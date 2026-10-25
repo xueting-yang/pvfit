@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import h5py
 import numpy as np
 
 from tests.data.toy_regression import DATA, reconstruct, summarize
@@ -24,6 +25,20 @@ class SyntheticRegressionTests(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()):
                     output, settings = reconstruct(work, workers)
                     actual = summarize(output, settings, work / "analysis")
+                with h5py.File(output, "r") as stored:
+                    self.assertEqual(stored.attrs["truth_track_selection"], "all_input")
+                    self.assertEqual(
+                        stored.attrs["assignment_track_selection"], "all_input"
+                    )
+                    for event in stored.values():
+                        mask = event["tracks/selected_for_seeding"][:]
+                        self.assertEqual(len(mask), event.attrs["n_tracks"])
+                        self.assertEqual(mask.sum(), event.attrs["n_seeding_tracks"])
+                        self.assertFalse(mask.all())
+                        for members in event["rec_vertices/track_indices"]:
+                            self.assertTrue(
+                                ((members >= 0) & (members < len(mask))).all()
+                            )
                 self.assertEqual(actual["events"].keys(), expected["events"].keys())
                 for event, reference in expected["events"].items():
                     for field, value in reference.items():

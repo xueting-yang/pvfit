@@ -2,6 +2,11 @@
 # Optional paths.input_hdf5 / paths.output_dir are relative to the working directory.
 analysis:
   method_name: PVfit
+  # One event-reading pass shared by all analyses. CLI overrides these settings.
+  workers: 1
+  batches: null  # automatic: four batches per worker, capped by the event count
+  work_dir: null  # default: <output>/.parallel_work; each run owns a fresh subdirectory
+  keep_columns: false  # retain temporary residual/pull columns for diagnostics
   analyses:
     - efficiency_track
     - efficiency_geo
@@ -22,7 +27,7 @@ analysis:
   z_scale: 1.5
   t_scale: 0.06
   m_r: 0.8
-  nsigma: 3.0
+  nsigma: 5.0
 
   # null follows reconstruction's max_chi2 saved with the HDF5 result.
   # Set a number only to override the cut for a diagnostic comparison.
@@ -34,7 +39,7 @@ analysis:
   z_residual_range: 0.7  # mm
   t_residual_range: 0.06 # ns
 
-  # Track-multiplicity binning of the performance plots.
+  # Track-multiplicity binning; overall rates include vertices outside these bins.
   plot_min_ntracks: 4
   plot_max_ntracks: 200
   plot_bin_width_ntracks: 5
@@ -46,6 +51,8 @@ analysis:
   # Optional per-plot override, e.g. {split_rate_geo_rec: 0.001}.
   rate_plot_ymax: {}
 
-  plot_event_id: 0
+  # Set both to the original run/event numbers, or leave both null for the first event.
+  plot_run_number: null
+  plot_event_number: null
   draw_fixed_ellipses: false
   draw_fitted_ellipses: true

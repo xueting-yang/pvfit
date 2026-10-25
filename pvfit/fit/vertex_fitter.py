@@ -129,7 +129,9 @@ def _fill_cache(cache, tracks, i, result):
     cache["HWH33_cache"][i] = 1 / c55
 
 
-def _assign_track_to_closest_vertex(tracks, i, vertex_rec_info, max_chi2, cache):
+def _assign_track_to_closest_vertex(
+    tracks, i, vertex_rec_info, max_track_seed_chi2, cache
+):
     """Find closest vertex for track i, assign it, and update cache.
 
     Returns True if the track was assigned, False otherwise.
@@ -144,7 +146,7 @@ def _assign_track_to_closest_vertex(tracks, i, vertex_rec_info, max_chi2, cache)
     track_info = extract_track_info_for_chi2(tracks, i)
     vertex_closest = None
     result_closest = None
-    trackvtxchi2_min = max_chi2
+    trackvtxchi2_min = max_track_seed_chi2
 
     for vertex in vertex_rec_info:
         result = calculate_track_vertex_chi2(track_info, vertex)
@@ -177,17 +179,19 @@ def _build_cache_for_vertex(tracks, vertex):
 
 
 def assign_tracks_to_vertices(
-    tracks, vertex_rec_info, max_chi2=10, drop_low_track_seeds=True
+    tracks, vertex_rec_info, *, max_track_seed_chi2, min_tracks_per_seed
 ):
     """
-    Assign tracks to closest vertices using chi2 distance.
+    Assign tracks to closest vertices using chi2 distance (Allen's
+    pv_beamline_assign_tracks).
 
     Args:
         tracks: track arrays from track_arrays()
         vertex_rec_info: List of reconstructed vertex dictionaries
-        max_chi2: Maximum chi2 threshold for track-vertex matching
-        drop_low_track_seeds: If True, remove seeds with < 4 tracks and reassign
-                              their tracks to the nearest remaining vertex
+        max_track_seed_chi2: a track joins its closest seed only below this chi2
+        min_tracks_per_seed: seeds with fewer tracks are removed and their
+                             tracks reassigned to the nearest remaining seed;
+                             0 keeps every seed
 
     Returns:
         dict: Cache containing chi2 values and HWH matrices for fitting
@@ -197,12 +201,16 @@ def assign_tracks_to_vertices(
 
     # Initial track-to-vertex assignment
     for i in range(n_tracks):
-        _assign_track_to_closest_vertex(tracks, i, vertex_rec_info, max_chi2, cache)
+        _assign_track_to_closest_vertex(
+            tracks, i, vertex_rec_info, max_track_seed_chi2, cache
+        )
 
-    # Remove vertices with < 4 tracks, reassign orphaned tracks
-    if drop_low_track_seeds:
+    # Remove seeds with too few tracks, reassign orphaned tracks
+    if min_tracks_per_seed > 0:
         orphaned_tracks = []
-        vertices_to_remove = [v for v in vertex_rec_info if len(v["track_index"]) < 4]
+        vertices_to_remove = [
+            v for v in vertex_rec_info if len(v["track_index"]) < min_tracks_per_seed
+        ]
         for vertex in vertices_to_remove:
             orphaned_tracks.extend(vertex["track_index"])
             vertex_rec_info.remove(vertex)
@@ -216,7 +224,7 @@ def assign_tracks_to_vertices(
         if vertex_rec_info:
             for i in orphaned_tracks:
                 _assign_track_to_closest_vertex(
-                    tracks, i, vertex_rec_info, max_chi2, cache
+                    tracks, i, vertex_rec_info, max_track_seed_chi2, cache
                 )
 
     return cache
@@ -226,22 +234,33 @@ def fit_vertices(
     tracks,
     vertex_rec_info,
     cache_data,
-    max_chi2=10,
+    *,
+    max_chi2_tukey,
+    max_fit_iterations,
+    max_delta_z_converged,
     is_adaptive_tukey=True,
+    max_vertex_rho2=None,
 ):
     """
-    Fit vertex parameters using assigned tracks with Tukey reweighting.
+    Fit vertex parameters using assigned tracks with Tukey reweighting
+    (Allen's pv_beamline_fitter).
 
     Args:
         tracks: track arrays from track_arrays()
         vertex_rec_info: List of reconstructed vertex dictionaries
         cache_data: Dictionary with cached chi2 values and HWH matrices
-        max_chi2: Maximum chi2 threshold for Tukey weight
+        max_chi2_tukey: Tukey bisquare threshold of the track chi2
+        max_fit_iterations: iterations of the fit
+        max_delta_z_converged: the fit stops once a z step is smaller (mm)
         is_adaptive_tukey: If True, recompute chi2 each iteration for Tukey weight;
                         if False, use cached chi2 from initial track assignment
+        max_vertex_rho2: fitted vertices with x^2 + y^2 at or above this (mm^2)
+                         are removed from vertex_rec_info, as Allen drops
+                         vertices off the beamline; None keeps them all
 
     Returns:
-        None: Modifies vertex_rec_info in-place with fitted parameters
+        None: Modifies vertex_rec_info in-place with fitted parameters; seeds
+        whose fit is singular or off the beamline are removed from it
     """
     trackvtxchi2_cache = cache_data["trackvtxchi2_cache"]
     HWH00_cache = cache_data["HWH00_cache"]
@@ -258,20 +277,17 @@ def fit_vertices(
     tx = tracks["tx"]
     ty = tracks["ty"]
 
+    rejected = []
     for vertex in vertex_rec_info:
         Params_rec_x = vertex["rec_x"]  # Initial values
         Params_rec_y = vertex["rec_y"]  # Initial values
         Params_rec_z = vertex["rec_z"]  # Initial values
         Params_rec_t = vertex["rec_t"]  # Initial values
 
-        # At least 4 tracks needed
-        if len(vertex["track_index"]) < 4:
-            continue
-
-        maxIter = 20
+        maxIter = max_fit_iterations
         minIter = 1
         Iter = 0
-        maxDeltaZ = 0.0005
+        maxDeltaZ = max_delta_z_converged
         converged = False
         cov_00 = cov_11 = cov_22 = cov_33 = None
 
@@ -304,9 +320,11 @@ def fit_vertices(
                 result = calculate_track_vertex_chi2(track_data, vertex_data)
 
                 if is_adaptive_tukey:
-                    weight = getTukeyWeight(result["chi2"], max_chi2=max_chi2)
+                    weight = getTukeyWeight(result["chi2"], max_chi2=max_chi2_tukey)
                 else:
-                    weight = getTukeyWeight(trackvtxchi2_cache[i], max_chi2=max_chi2)
+                    weight = getTukeyWeight(
+                        trackvtxchi2_cache[i], max_chi2=max_chi2_tukey
+                    )
                 sum_weight += weight
                 totol_chi2 += weight * result["chi2"]
 
@@ -389,7 +407,18 @@ def fit_vertices(
             Iter += 1
 
         if cov_00 is None:
-            # Singular on the first iteration: no fit result for this seed.
+            # Singular on the first iteration: no fit and no vertex, as Allen's
+            # fit_vertex reports failure and the seed is not written out.
+            rejected.append(vertex)
+            continue
+
+        # Vertices off the beamline are not primary vertices (Allen: rho2 cut
+        # after the fit, relative to the beamline, which is the origin here).
+        if (
+            max_vertex_rho2 is not None
+            and Params_rec_x**2 + Params_rec_y**2 >= max_vertex_rho2
+        ):
+            rejected.append(vertex)
             continue
 
         # Save fitted parameters
@@ -402,24 +431,31 @@ def fit_vertices(
         vertex["cov_22"] = cov_22
         vertex["cov_33"] = cov_33
 
+    for vertex in rejected:
+        vertex_rec_info.remove(vertex)
+
 
 def fit_reconstructed_vertices(
     event_data_selected,
     vertex_rec_info,
-    max_chi2=10,
+    *,
+    max_track_seed_chi2,
+    min_tracks_per_seed,
+    max_chi2_tukey,
+    max_fit_iterations,
+    max_delta_z_converged,
+    max_vertex_rho2,
     is_adaptive_tukey=True,
-    drop_low_track_seeds=True,
 ):
     """
-    Fit all reconstructed vertices in the event.
+    Assign tracks to the seeds and fit every seed of the event.
 
     Args:
-        event_data_selected: DataFrame with filtered track data
+        event_data_selected: Input track DataFrame, including rows outside the seed window
         vertex_rec_info: List of reconstructed vertex dictionaries
-        max_chi2: Maximum chi2 threshold for track-vertex matching and Tukey weight
-        is_adaptive_tukey: If True, recompute chi2 each iteration for Tukey weight;
-                        if False, use cached chi2 from initial track assignment
-        drop_low_track_seeds: If True, remove seeds with < 4 tracks and reassign
+        max_track_seed_chi2, min_tracks_per_seed: see assign_tracks_to_vertices
+        max_chi2_tukey, max_fit_iterations, max_delta_z_converged,
+        max_vertex_rho2, is_adaptive_tukey: see fit_vertices
 
     Returns:
         None: Modifies vertex_rec_info in-place with fitted parameters
@@ -428,37 +464,53 @@ def fit_reconstructed_vertices(
 
     # Step 1: Assign tracks to vertices, we cache some data here for fitting
     cache_data = assign_tracks_to_vertices(
-        tracks, vertex_rec_info, max_chi2, drop_low_track_seeds
+        tracks,
+        vertex_rec_info,
+        max_track_seed_chi2=max_track_seed_chi2,
+        min_tracks_per_seed=min_tracks_per_seed,
     )
 
     # Step 2: Fit vertices
-    fit_vertices(tracks, vertex_rec_info, cache_data, max_chi2, is_adaptive_tukey)
+    fit_vertices(
+        tracks,
+        vertex_rec_info,
+        cache_data,
+        max_chi2_tukey=max_chi2_tukey,
+        max_fit_iterations=max_fit_iterations,
+        max_delta_z_converged=max_delta_z_converged,
+        is_adaptive_tukey=is_adaptive_tukey,
+        max_vertex_rho2=max_vertex_rho2,
+    )
 
 
 def merge_close_vertices(
     event_data_selected,
     vertex_rec_info,
-    max_chi2=10,
+    *,
+    min_chi2_dist_merge,
+    max_chi2_tukey,
+    max_fit_iterations,
+    max_delta_z_converged,
     is_adaptive_tukey=True,
-    nsigma_merge=5,
 ):
     """
-    Merge reconstructed vertices that are close in (z, t) space after fitting.
+    Merge reconstructed vertices that are close in (z, t) space after fitting
+    (Allen's pv_beamline_merge_vertices).
 
     For each pair of fitted vertices, compute a chi2 distance:
         chi2 = (dz / sigma_z)^2 + (dt / sigma_t)^2
     where sigma_z = sqrt(cov_zz_i + cov_zz_j), sigma_t = sqrt(cov_tt_i + cov_tt_j).
-    Pairs with chi2 < nsigma_merge^2 are merged: their track lists are combined,
-    and the merged vertex is re-fitted.
+    Pairs with chi2 < min_chi2_dist_merge are merged: their track lists are
+    combined, and the merged vertex is re-fitted. A threshold of 0 merges nothing.
 
     Single pass: find all pairs within threshold, merge each pair directly.
 
     Args:
-        event_data_selected: DataFrame with filtered track data
+        event_data_selected: Input track DataFrame, including rows outside the seed window
         vertex_rec_info: List of reconstructed vertex dictionaries (modified in-place)
-        max_chi2: Maximum chi2 threshold for Tukey weight during re-fit
-        is_adaptive_tukey: Tukey mode for re-fit
-        nsigma_merge: Sigma threshold for merging (chi2 < nsigma_merge^2)
+        min_chi2_dist_merge: chi2 distance below which two vertices are one
+        max_chi2_tukey, max_fit_iterations, max_delta_z_converged,
+        is_adaptive_tukey: fit settings of the re-fit (see fit_vertices)
 
     Returns:
         None: Modifies vertex_rec_info in-place
@@ -473,7 +525,7 @@ def merge_close_vertices(
     if len(fitted) < 2:
         return
 
-    chi2_threshold = nsigma_merge**2
+    chi2_threshold = min_chi2_dist_merge
 
     # ------------------------------------------------------------------
     # Find pairs to merge
@@ -541,6 +593,43 @@ def merge_close_vertices(
         already_merged.add(vi["rec_vertex_id"])
         already_merged.add(vj["rec_vertex_id"])
 
-        # Re-fit only this merged vertex
+        # Re-fit only this merged vertex (Allen applies no rho2 cut here)
         cache_data = _build_cache_for_vertex(tracks, merged)
-        fit_vertices(tracks, [merged], cache_data, max_chi2, is_adaptive_tukey)
+        fit_vertices(
+            tracks,
+            [merged],
+            cache_data,
+            max_chi2_tukey=max_chi2_tukey,
+            max_fit_iterations=max_fit_iterations,
+            max_delta_z_converged=max_delta_z_converged,
+            is_adaptive_tukey=is_adaptive_tukey,
+        )
+        if "Params_rec_x" not in merged:
+            # The merged fit was singular: no vertex, as for a single seed
+            vertex_rec_info.remove(merged)
+
+
+def select_members(event_data_selected, vertex_rec_info, *, max_chi2_tukey):
+    """Final membership of every fitted vertex, as Allen's
+    pv_beamline_merge_vertices writes it: of the tracks assigned to the seed
+    (and absorbed by merging), those whose chi2 at the fitted position is below
+    the Tukey threshold, i.e. with nonzero weight in the final fit. The
+    assignment list is kept as ``assigned_index``; ``track_index`` becomes the
+    member list the output stores. Vertices without a fit are left unchanged.
+    """
+    fitted = [v for v in vertex_rec_info if all(f"Params_rec_{c}" in v for c in "xyzt")]
+    if not fitted:
+        return
+    tracks = track_arrays(event_data_selected)
+    for vertex in fitted:
+        position = {f"rec_{c}": vertex[f"Params_rec_{c}"] for c in "xyzt"}
+        assigned = list(vertex["track_index"])
+        vertex["assigned_index"] = assigned
+        vertex["track_index"] = [
+            i
+            for i in assigned
+            if calculate_track_vertex_chi2(
+                extract_track_info_for_chi2(tracks, i), position
+            )["chi2"]
+            < max_chi2_tukey
+        ]

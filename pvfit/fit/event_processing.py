@@ -11,7 +11,11 @@ import pandas as pd
 # Seed finding & vertex fitting
 from .seedings_finder import fill_histogram_for_seedings, find_seedings
 from .truth_matching import build_true_vertex_info, select_tracks
-from .vertex_fitter import fit_reconstructed_vertices, merge_close_vertices
+from .vertex_fitter import (
+    fit_reconstructed_vertices,
+    merge_close_vertices,
+    select_members,
+)
 
 
 def process_event_wrapper(args):
@@ -37,9 +41,9 @@ def process_event(
     """
     Process a single event:
       - read true vertices from MCPV data
-      - apply z/t cuts to tracks
+      - apply z/t cuts only to seeding tracks
       - run seeding
-      - run vertex fitting
+      - assign and fit using all input tracks
       - build true / reco vertex structures
 
     NOTE:
@@ -66,25 +70,29 @@ def process_event(
     """
 
     # ------------------------------------------------------------
-    # 0. Extract configuration parameters
+    # 0. Fit settings shared by the first fit and the merge re-fit
     # ------------------------------------------------------------
-    max_chi2 = params["max_chi2"]
-    is_adaptive_tukey = params["is_adaptive_tukey"]
-    drop_low_track_seeds = params["drop_low_track_seeds"]
+    fit_settings = dict(
+        max_chi2_tukey=params["max_chi2_tukey"],
+        max_fit_iterations=params["max_fit_iterations"],
+        max_delta_z_converged=params["max_delta_z_converged"],
+        is_adaptive_tukey=params["is_adaptive_tukey"],
+    )
 
     # ------------------------------------------------------------
-    # 1. Select tracks and build truth membership on the same row order
+    # 1. Build truth on all input rows; select tracks only for seeding
     # ------------------------------------------------------------
-    event_data_selected = select_tracks(event_track_data, params)
+    event_data = event_track_data.reset_index(drop=True)
     vertex_true_info = build_true_vertex_info(
-        event_data_selected,
+        event_data,
         event_mcpv_data,
     )
+    seeding_tracks = select_tracks(event_data, params)
 
     # ------------------------------------------------------------
     # 3. Seeding
     # ------------------------------------------------------------
-    H = fill_histogram_for_seedings(event_data_selected, params)
+    H = fill_histogram_for_seedings(seeding_tracks, params)
     seedings = find_seedings(H, params)
 
     # ------------------------------------------------------------
@@ -107,31 +115,41 @@ def process_event(
     # ------------------------------------------------------------
     # 5. Vertex fitting
     # ------------------------------------------------------------
+    # Window-excluded tracks can still match an existing seed by chi2.
     fit_reconstructed_vertices(
-        event_data_selected,
+        event_data,
         vertex_rec_info,
-        max_chi2,
-        is_adaptive_tukey,
-        drop_low_track_seeds,
+        max_track_seed_chi2=params["max_track_seed_chi2"],
+        min_tracks_per_seed=params["min_tracks_per_seed"],
+        max_vertex_rho2=params["max_vertex_rho2"],
+        **fit_settings,
     )
 
     # ------------------------------------------------------------
-    # 5b. Merge close vertices in (z, t) space
+    # 5b. Merge close vertices in (z, t) space (a threshold of 0 merges nothing)
     # ------------------------------------------------------------
-    if params["merge_vertices"]:
-        nsigma_merge = params["nsigma_merge"]
+    if params["min_chi2_dist_merge"] > 0:
         merge_close_vertices(
-            event_data_selected,
+            event_data,
             vertex_rec_info,
-            max_chi2,
-            is_adaptive_tukey,
-            nsigma_merge,
+            min_chi2_dist_merge=params["min_chi2_dist_merge"],
+            **fit_settings,
         )
+
+    # ------------------------------------------------------------
+    # 6. Members: assigned tracks with nonzero Tukey weight at the fitted
+    #    position (Allen's output convention); the assignment list stays
+    #    available as assigned_index
+    # ------------------------------------------------------------
+    select_members(event_data, vertex_rec_info, max_chi2_tukey=params["max_chi2_tukey"])
 
     # ------------------------------------------------------------
     # 7. Collect summary numbers
     # ------------------------------------------------------------
     n_fitted = len([v for v in vertex_rec_info if "Params_rec_x" in v])
+
+    # Truth, assignment, fitting and storage share the full row order;
+    # reconstructed member indices therefore need no remapping.
 
     return {
         "event_number": event_number,
@@ -142,5 +160,6 @@ def process_event(
         "histogram": H,
         "vertex_true_info": vertex_true_info,
         "vertex_rec_info": vertex_rec_info,
-        "event_data_selected": event_data_selected.reset_index(drop=True),
+        "event_data": event_data,
+        "selected_for_seeding": event_data.index.isin(seeding_tracks.index),
     }

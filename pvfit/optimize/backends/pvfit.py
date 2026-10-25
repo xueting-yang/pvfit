@@ -11,16 +11,17 @@ from .base import Backend, run_logged
 
 # The ReconstructionConfig fields a study varies, in export order.
 PARAM_COLS = [
-    "minTracks",
-    "smear_window_size",
-    "bins_z",
-    "bins_t",
-    "max_chi2",
-    "nsigma_merge",
-    "max_track_bl_chi2",
-    "pp_max_track_z0_err",
+    "min_tracks_in_seed",
+    "smear_window_nbins",
+    "n_bins_z",
+    "n_bins_t",
+    "max_track_seed_chi2",
+    "max_chi2_tukey",
+    "min_chi2_dist_merge",
+    "max_track_beamline_chi2_xy",
+    "max_track_z0_err",
 ]
-INT_PARAMETERS = {"smear_window_size", "bins_z", "bins_t"}
+INT_PARAMETERS = {"smear_window_nbins", "n_bins_z", "n_bins_t"}
 
 
 class PVFitBackend(Backend):
@@ -44,7 +45,9 @@ class PVFitBackend(Backend):
 
     def derived(self, sampled, base_cfg):
         trial_cfg = replace(ReconstructionConfig.from_mapping(base_cfg), **sampled)
-        return {"derived_m_minTracks": trial_cfg.m_minTracks}
+        return {
+            "derived_scaled_min_tracks_in_seed": trial_cfg.scaled_min_tracks_in_seed
+        }
 
     def write_config(self, base_cfg, sampled, trial_dir, trial_workers, input_root):
         """Apply the sampled parameters to the base config; write reconstruction.yaml."""

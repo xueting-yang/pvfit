@@ -65,14 +65,14 @@ class OptimizationConfigTests(unittest.TestCase):
         self.assertEqual(settings["backend"], "pvfit")
 
     def test_backend_must_exist_and_own_the_search_space(self):
-        with self.assertRaisesRegex(ValueError, "Unknown backend 'allen'"):
-            get_backend("allen")
-        self.config["execution"]["backend"] = "allen"
+        with self.assertRaisesRegex(ValueError, "Unknown backend 'missing'"):
+            get_backend("missing")
+        self.config["execution"]["backend"] = "missing"
         self.save()
         with self.assertRaisesRegex(ValueError, "Unknown backend"):
             load_optimization_settings(self.path)
         self.config["execution"]["backend"] = "pvfit"
-        del self.config["search_space"]["bins_t"]
+        del self.config["search_space"]["n_bins_t"]
         self.save()
         with self.assertRaisesRegex(ValueError, "must define exactly"):
             load_optimization_settings(self.path)
@@ -83,8 +83,8 @@ class OptimizationConfigTests(unittest.TestCase):
             ("study", "n_jobs", 0),
             ("execution", "trial_workers", True),
             ("execution", "all_input_files", "false"),
-            ("search_space", "bins_z", {"type": "int", "low": 1.5, "high": 10}),
-            ("search_space", "max_chi2", {"type": "float", "low": 15, "high": 4}),
+            ("search_space", "n_bins_z", {"type": "int", "low": 1.5, "high": 10}),
+            ("search_space", "max_chi2_tukey", {"type": "float", "low": 15, "high": 4}),
         ):
             with self.subTest(section=section, key=key):
                 self.config = copy.deepcopy(original)
@@ -97,7 +97,7 @@ class OptimizationConfigTests(unittest.TestCase):
         self.analysis["analysis"]["method_name"] = "External Reco"
         self.analysis["analysis"]["purity_threshold"] = 0.95
         original = copy.deepcopy(self.analysis)
-        self.config["search_space"]["max_chi2"].update(low=6.5, high=6.5)
+        self.config["search_space"]["max_chi2_tukey"].update(low=6.5, high=6.5)
         self.save()
         settings = load_optimization_settings(self.path)
         study = optuna.create_study(
@@ -112,7 +112,7 @@ class OptimizationConfigTests(unittest.TestCase):
             if stage == "fit":
                 self.assertEqual(config_path, trial_dir / "reconstruction.yaml")
                 reco = yaml.safe_load(config_path.read_text())
-                self.assertEqual(reco["algorithm"]["max_chi2"], 6.5)
+                self.assertEqual(reco["algorithm"]["max_chi2_tukey"], 6.5)
                 self.assertNotIn("purity_threshold", reco["algorithm"])
                 self.assertNotIn("analyses", reco["workflow"])
                 self.assertEqual(reco["paths"]["output_dir"], str(trial_dir))
@@ -155,14 +155,14 @@ class OptimizationConfigTests(unittest.TestCase):
             self.assertEqual(objective(trial), (0.5, 0.5, 0.5, 0.5))
         self.assertEqual(run.call_count, 2)
         self.assertAlmostEqual(
-            trial.user_attrs["derived_m_minTracks"],
-            trial.params["minTracks"]
-            * (400 / trial.params["bins_z"])
-            * (1.6 / trial.params["bins_t"])
+            trial.user_attrs["derived_scaled_min_tracks_in_seed"],
+            trial.params["min_tracks_in_seed"]
+            * (400 / trial.params["n_bins_z"])
+            * (1.6 / trial.params["n_bins_t"])
             / (0.5 * 0.025),
         )
         self.assertEqual(self.analysis, original)
-        self.assertEqual(self.reconstruction["algorithm"]["max_chi2"], 10)
+        self.assertEqual(self.reconstruction["algorithm"]["max_chi2_tukey"], 12.0)
 
     def test_export_handles_trials_without_a_sampler_generation(self):
         study = optuna.create_study(

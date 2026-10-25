@@ -1,0 +1,27 @@
+# Allen runtime used by optimization_allen.yaml. Paths are CWD-relative;
+# $ENVIRONMENT_VARIABLES and ~ are accepted. Fill these for your installed stack.
+paths:
+  input_mdf: input/*.mdf
+  allen_run: ${ALLEN_ROOT}/run
+  entrypoint: ${ALLEN_ROOT}/Dumpers/BinaryDumpers/options/allen.py
+  # Complete executable sequence JSON from the SAME Allen build (including sequence).
+  sequence: input/allen_configuration.json
+  # Content-hashed once when opening/resuming a study. Include all libraries,
+  # custom launch scripts, local geometry/parameter assets that affect the run.
+  runtime_files:
+    - ${ALLEN_ROOT}/InstallArea/*/lib/libAllen*.so
+
+runtime:
+  n_events: 1000
+  events_per_slice: 200
+  device: "0"
+  timeout_seconds: 1800
+  tags: dd4hep:run5/branch-baseline,run5-ideal
+  params: ${PARAMFILESROOT}  # expanded INSIDE Allen/run's environment
+  detector_list: [/world, TV]
+  memory_mb: 1000
+  host_memory_mb: 200
+  # Optional CUDA toolkit paths, restored after Allen/run resets the environment.
+  # Set these when the selected stack requires an external toolkit.
+  cuda_bin: null
+  cuda_lib: null

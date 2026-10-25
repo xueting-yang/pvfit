@@ -15,13 +15,15 @@ execution:
   trial_workers: 20
   all_input_files: false  # false: use only the first matching file
 
-# The current PVFit optimizer varies these eight reconstruction parameters.
+# The PVFit optimizer varies these nine reconstruction parameters
+# (names as in reconstruction.yaml).
 search_space:
-  minTracks: {type: float, low: 1.0, high: 3.0}
-  smear_window_size: {type: int, low: 1, high: 4}
-  bins_z: {type: int, low: 400, high: 1200, step: 40}
-  bins_t: {type: int, low: 42, high: 140, step: 7}
-  max_chi2: {type: float, low: 4.0, high: 15.0, step: 0.5}
-  nsigma_merge: {type: float, low: 3.0, high: 8.0, step: 0.5}
-  max_track_bl_chi2: {type: float, low: 5.0, high: 20.0, step: 1.0}
-  pp_max_track_z0_err: {type: float, low: 0.5, high: 3.0, step: 0.25}
+  min_tracks_in_seed: {type: float, low: 1.0, high: 3.0}
+  smear_window_nbins: {type: int, low: 1, high: 4}
+  n_bins_z: {type: int, low: 400, high: 1200, step: 40}
+  n_bins_t: {type: int, low: 42, high: 140, step: 7}
+  max_track_seed_chi2: {type: float, low: 4.0, high: 15.0, step: 0.5}
+  max_chi2_tukey: {type: float, low: 4.0, high: 15.0, step: 0.5}
+  min_chi2_dist_merge: {type: float, low: 9.0, high: 64.0, step: 1.0}
+  max_track_beamline_chi2_xy: {type: float, low: 5.0, high: 20.0, step: 1.0}
+  max_track_z0_err: {type: float, low: 0.5, high: 3.0, step: 0.25}

@@ -17,21 +17,21 @@ def find_seedings(histogram, params):
     Args:
         histogram (numpy.ndarray): 2D histogram array of track density in (z,t) space
         params (dict): Configuration parameters including:
-            - zmin, tmin: Minimum z and t values
-            - Nbins_z, Nbins_t: Number of bins in z and t dimensions
+            - z_min, t_min: Minimum z and t values
+            - n_bins_z, n_bins_t: Number of bins in z and t dimensions
             - bin_size_z, bin_size_t: Bin widths
-            - m_minTracks: Minimum track count threshold for seeding
+            - scaled_min_tracks_in_seed: 3x3 integral a maximum needs at this binning
 
     Returns:
         list: List of (z, t) tuples representing seeding candidates in physical coordinates
     """
     seedings = []
     # Extract parameters
-    zMin = params["zmin"]
-    tMin = params["tmin"]
-    nZbins = params["Nbins_z"]
-    nTbins = params["Nbins_t"]
-    minTracks = params["m_minTracks"]
+    zMin = params["z_min"]
+    tMin = params["t_min"]
+    nZbins = params["n_bins_z"]
+    nTbins = params["n_bins_t"]
+    minTracks = params["scaled_min_tracks_in_seed"]
 
     # Calculate bin width
     zW = params["bin_size_z"]
@@ -88,25 +88,27 @@ def fill_histogram_for_seedings(event_data, params):
             - c00, c11, c55: Covariance matrix elements
             - tx, ty: Track slopes
         params (dict): Configuration parameters including:
-            - zmin, tmin: Histogram boundaries
-            - Nbins_z, Nbins_t: Number of histogram bins
+            - z_min, t_min: Histogram boundaries
+            - n_bins_z, n_bins_t: Number of histogram bins
             - bin_size_z, bin_size_t: Bin sizes
-            - smear_window_size: Half-width of the fixed bin window used for Gaussian smearing
+            - smear_window_nbins: Half-width of the fixed bin window used for Gaussian smearing
+            - max_track_beamline_chi2_xy: tracks with a larger xy chi2 to the
+              beamline are skipped (inf: no cut), as in Allen's pv_beamline_histo
+            - max_track_z0_err: tracks with a larger z error at the beamline are
+              skipped (inf: no cut)
 
     Returns:
         numpy.ndarray: 2D histogram array with track density values
     """
-    zmin = params["zmin"]
-    tmin = params["tmin"]
-    Nbins_z = params["Nbins_z"]
-    Nbins_t = params["Nbins_t"]
+    zmin = params["z_min"]
+    tmin = params["t_min"]
+    Nbins_z = params["n_bins_z"]
+    Nbins_t = params["n_bins_t"]
     bin_size_z = params["bin_size_z"]
     bin_size_t = params["bin_size_t"]
-    smear_window_size = params["smear_window_size"]
-    beamline_chi2_cut = params["beamline_chi2_cut"]
-    max_track_bl_chi2 = params["max_track_bl_chi2"]
-    z0_err_cut = params["z0_err_cut"]
-    pp_max_track_z0_err = params["pp_max_track_z0_err"]
+    smear_window_size = params["smear_window_nbins"]
+    max_track_bl_chi2 = params["max_track_beamline_chi2_xy"]
+    pp_max_track_z0_err = params["max_track_z0_err"]
 
     # Track columns as positional arrays (original dtypes kept)
     z = event_data["beamPOCA_z"].to_numpy()
@@ -116,19 +118,17 @@ def fill_histogram_for_seedings(event_data, params):
     c55 = event_data["c55"].to_numpy()
     tx = event_data["beamPOCA_tx"].to_numpy()
     ty = event_data["beamPOCA_ty"].to_numpy()
-    if beamline_chi2_cut:
-        x = event_data["beamPOCA_x"].to_numpy()
-        y = event_data["beamPOCA_y"].to_numpy()
+    x = event_data["beamPOCA_x"].to_numpy()
+    y = event_data["beamPOCA_y"].to_numpy()
 
     # Create histogram
     H = np.zeros((Nbins_z, Nbins_t))
 
     for i in range(len(z)):
-        # Optional beamline chi2 cut to filter tracks far from beamline
-        if beamline_chi2_cut:
-            blchi2 = x[i] ** 2 * W_00[i] + y[i] ** 2 * W_11[i]
-            if blchi2 >= max_track_bl_chi2:
-                continue
+        # Beamline chi2 cut (an infinite threshold keeps every track)
+        blchi2 = x[i] ** 2 * W_00[i] + y[i] ** 2 * W_11[i]
+        if blchi2 >= max_track_bl_chi2:
+            continue
 
         zbin = (z[i] - zmin) / bin_size_z
         tbin = (t[i] - tmin) / bin_size_t
@@ -142,7 +142,7 @@ def fill_histogram_for_seedings(event_data, params):
         zerr = 1 / np.sqrt(weight_term)
         terr = np.sqrt(c55[i])
 
-        if z0_err_cut and zerr >= pp_max_track_z0_err:
+        if zerr >= pp_max_track_z0_err:
             continue
 
         # Restrict the Gaussian smearing to a fixed window in bin units.

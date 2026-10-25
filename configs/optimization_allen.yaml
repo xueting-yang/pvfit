@@ -1,0 +1,40 @@
+# Study settings and search ranges; reconstruction/evaluation have their own files.
+study:
+  name: allen_nsga2_v1
+  output_dir: output/optuna  # relative to the working directory
+  n_trials: 200
+  n_jobs: 1
+  population_size: 50
+  sampler_seed: 42
+
+execution:
+  backend: allen  # runs Allen on MDF inputs, then converts and evaluates its ROOT dump
+  # Config references are relative to THIS YAML file.
+  reconstruction_config: allen.yaml
+  analysis_config: analysis.yaml  # shared cuts; the backend labels outputs as Allen
+  all_input_files: false  # false: use only the first matching file
+
+# Runtime Allen properties, mapped using the same nine PV parameter names.
+# A subset is allowed; omitted parameters retain their values in the sequence JSON.
+# min_tracks_in_seed is UNscaled: the Allen peak kernel applies bin-area scaling.
+search_space:
+  min_tracks_in_seed: {type: float, low: 1.0, high: 3.0}
+  smear_window_nbins: {type: int, low: 1, high: 4}
+  n_bins_z: {type: int, low: 400, high: 1200, step: 40}
+  n_bins_t: {type: int, low: 42, high: 140, step: 7}
+  max_track_seed_chi2: {type: float, low: 4.0, high: 15.0, step: 0.5}
+  max_chi2_tukey: {type: float, low: 4.0, high: 15.0, step: 0.5}
+  min_chi2_dist_merge: {type: float, low: 9.0, high: 64.0, step: 1.0}
+  max_track_beamline_chi2_xy: {type: float, low: 5.0, high: 20.0, step: 1.0}
+  max_track_z0_err: {type: float, low: 0.5, high: 3.0, step: 0.25}
+
+# Used by --submit-condor / --prepare-condor: ONE job runs all n_trials.
+# Paths, software, MDF inputs and output must be on the shared filesystem.
+condor:
+  request_cpus: 4
+  request_memory_mb: 16384
+  request_disk_mb: 12288
+  gpu_model: L40S
+  use_os: el9
+  job_category: medium  # required by the Nikhef scheduler
+  max_runtime_seconds: 21600  # whole job; exceeding it holds/releases the GPU

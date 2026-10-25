@@ -86,6 +86,40 @@ def _add_options(parser, command):
             type=Path,
             help="Input ROOT file or glob (overrides paths.input_root)",
         )
+    if command in ("analyze", "run"):
+        worker_flags = (
+            ("--workers", "--analysis-workers", "-w")
+            if command == "analyze"
+            else ("--analysis-workers",)
+        )
+        batch_flags = (
+            ("--batches", "--analysis-batches")
+            if command == "analyze"
+            else ("--analysis-batches",)
+        )
+        parser.add_argument(
+            *worker_flags,
+            dest="analysis_workers",
+            type=_positive_int,
+            help="Analysis processes (default: analysis.workers, 1)",
+        )
+        parser.add_argument(
+            *batch_flags,
+            dest="analysis_batches",
+            type=_positive_int,
+            help="Analysis event batches (default: four per worker)",
+        )
+        parser.add_argument(
+            "--analysis-work-dir",
+            type=Path,
+            help="Parent directory for temporary analysis columns",
+        )
+        parser.add_argument(
+            "--keep-analysis-columns",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Retain temporary analysis columns",
+        )
     if command != "fit":
         parser.add_argument(
             "--analyses",
@@ -117,7 +151,18 @@ def _add_optimize_options(parser):
         "--all-input-files",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Use all matching ROOT inputs instead of the first file",
+        help="Use all matching backend inputs (ROOT or MDF) instead of the first file",
+    )
+    submission = parser.add_mutually_exclusive_group()
+    submission.add_argument(
+        "--submit-condor",
+        action="store_true",
+        help="Submit the whole Allen optimization as one Condor GPU job",
+    )
+    submission.add_argument(
+        "--prepare-condor",
+        action="store_true",
+        help="Write and dry-run validate the Condor job without submitting",
     )
     parser.add_argument(
         "--export-only",
@@ -166,6 +211,10 @@ def build_parser():
         ("run", "Run reconstruction followed by analysis"),
         ("optimize", "Run an NSGA-II parameter study over a reconstruction backend"),
         ("toy", "Generate a synthetic ROOT sample that needs no reference data"),
+        (
+            "convert-allen",
+            "Convert Allen monitoring ROOT output into the PVFit HDF5 layout",
+        ),
         ("init-config", "Copy the bundled default YAML files for editing"),
     ):
         command = commands.add_parser(
@@ -177,6 +226,8 @@ def build_parser():
             _add_optimize_options(command)
         elif name == "toy":
             _add_toy_options(command)
+        elif name == "convert-allen":
+            _add_convert_allen_options(command)
         else:
             _add_options(command, name)
     return parser
@@ -210,6 +261,11 @@ def _prepare(args):
         inputs = sorted(glob.glob(str(Path(cfg.input_root).expanduser())))
         if not inputs:
             raise ValueError(f"No input ROOT files matched: {cfg.input_root}")
+        track_input = None
+        if cfg.track_input_configuration is not None:
+            from .allen import load_track_input
+
+            track_input = load_track_input(inputs, cfg.track_input_configuration)
         fit_options = dict(
             input_files=inputs,
             track_tree_name=cfg.track_tree_name,
@@ -219,6 +275,7 @@ def _prepare(args):
             max_workers=cfg.max_workers,
             output_dir=str(Path(cfg.output_dir).expanduser()),
             hdf5_file=cfg.hdf5_file,
+            track_input=track_input,
         )
 
     if args.command in ("analyze", "run"):
@@ -235,8 +292,24 @@ def _prepare(args):
                 "Analysis configuration requires an 'analysis' mapping; use a separate analysis YAML"
             )
         settings = AnalysisConfig.from_mapping(analysis_config)
+        overrides = {
+            name: value
+            for name, value in (
+                ("workers", args.analysis_workers),
+                ("batches", args.analysis_batches),
+                (
+                    "work_dir",
+                    str(args.analysis_work_dir.expanduser())
+                    if args.analysis_work_dir
+                    else None,
+                ),
+                ("keep_columns", args.keep_analysis_columns),
+            )
+            if value is not None
+        }
         if args.analyses is not None:
-            settings = replace(settings, analyses=tuple(args.analyses))
+            overrides["analyses"] = tuple(args.analyses)
+        settings = replace(settings, **overrides)
         if fit_options:
             input_hdf5 = Path(fit_options["output_dir"]) / fit_options["hdf5_file"]
             analysis_dir = Path(fit_options["output_dir"]) / "analysis"
@@ -284,13 +357,95 @@ def _run_toy(args):
     print(json.dumps(summary, indent=2))
 
 
+def _add_convert_allen_options(parser):
+    from .convert_allen import CONFIGURATION_NAME, DEFAULT_TREES
+    from .fit.truth_matching import TRUTH_MIN_TRACKS
+
+    parser.add_argument(
+        "--input",
+        type=Path,
+        nargs="+",
+        required=True,
+        help="Allen histograms.root file(s); events are keyed by (run, event) across files",
+    )
+    parser.add_argument("--output", type=Path, required=True, help="HDF5 file to write")
+    parser.add_argument(
+        "--allen-config",
+        type=Path,
+        default=None,
+        help=f"Allen configuration JSON (default: {CONFIGURATION_NAME} next to each input)",
+    )
+    parser.add_argument(
+        "--allow-missing-configuration",
+        action="store_true",
+        help=(
+            "convert without an Allen configuration; only the histogram binning is "
+            "recorded, the other reconstruction parameters stay unknown"
+        ),
+    )
+    parser.add_argument(
+        "--n-bins-z",
+        type=int,
+        default=None,
+        help=(
+            "z bins of the seeding histogram; required without a configuration, "
+            "must agree with it otherwise"
+        ),
+    )
+    parser.add_argument(
+        "--n-bins-t",
+        type=int,
+        default=None,
+        help="t bins of the seeding histogram (as --n-bins-z)",
+    )
+    for key, flag in (
+        ("tracks", "--track-tree"),
+        ("truth", "--truth-tree"),
+        ("histogram", "--histogram-tree"),
+        ("peaks", "--peak-tree"),
+        ("vertices", "--vertex-tree"),
+    ):
+        parser.add_argument(flag, dest=f"tree_{key}", default=DEFAULT_TREES[key])
+    parser.add_argument(
+        "--min-truth-tracks",
+        type=int,
+        default=TRUTH_MIN_TRACKS,
+        help="rows a true vertex needs to enter the denominators (as in pvfit fit)",
+    )
+    parser.add_argument(
+        "--debug", action="store_true", help="Show the full traceback on errors"
+    )
+
+
+def _run_convert_allen(args):
+    from .convert_allen import convert_allen_root
+
+    trees = {
+        key: getattr(args, f"tree_{key}")
+        for key in ("tracks", "truth", "histogram", "peaks", "vertices")
+    }
+    return convert_allen_root(
+        args.input,
+        args.output,
+        allen_config=args.allen_config,
+        n_bins_z=args.n_bins_z,
+        n_bins_t=args.n_bins_t,
+        trees=trees,
+        min_truth_tracks=args.min_truth_tracks,
+        allow_missing_configuration=args.allow_missing_configuration,
+    )
+
+
 def _run_optimization(args):
     from .optimize.run import run_optimization
 
     overrides = {key: value for key, value in vars(args).items() if key != "config"}
-    return run_optimization(
-        args.config or default_config_path("optimization.yaml"), overrides
-    )
+    config = args.config or default_config_path("optimization.yaml")
+    if args.submit_condor or args.prepare_condor:
+        from .optimize.condor import prepare_submission
+
+        return prepare_submission(config, overrides, submit=args.submit_condor)
+    return run_optimization(config, overrides)
 
 
 def main(argv=None):
@@ -308,6 +463,9 @@ def main(argv=None):
         if args.command == "toy":
             _run_toy(args)
             return 0
+        if args.command == "convert-allen":
+            _run_convert_allen(args)
+            return 0
         fit_options, analysis_options, reconstruction = _prepare(args)
     except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError) as exc:
         if getattr(args, "debug", False):
@@ -319,6 +477,11 @@ def main(argv=None):
         )
         print(f"pvfit: error: {detail}", file=sys.stderr)
         return 2
+    except RuntimeError as exc:
+        if getattr(args, "debug", False):
+            raise
+        print(f"pvfit: error: {exc}", file=sys.stderr)
+        return 1
     try:
         if fit_options:
             with StageRecord(
@@ -350,7 +513,9 @@ def main(argv=None):
                 [analysis_options["hdf5_file"]],
                 invocation,
             ) as record:
-                _run_analysis(analysis_options)
+                execution = _run_analysis(analysis_options)
+                if isinstance(execution, dict):
+                    record.data["execution"] = execution
                 record.data["outputs"] = [str(output_dir.resolve())]
             done.touch()
             print(f"Analysis complete: {output_dir}")

@@ -7,6 +7,12 @@ paths:
   mc_vertex_tree_name: "mc_pv_dumper/MCPV_effective_tree"       # MC true vertex data
   output_dir: "./output/baseline"
   hdf5_file: "fit_results.h5"
+  # Optional: the configuration of the program that produced the input tracks
+  # (an Allen configuration JSON), so the hit time resolution its track fit
+  # assumed is recorded with the result as input_hit_time_resolution_ns.
+  # Relative paths resolve against each input file's directory, for example
+  # "allen_configuration.json". null: record no track-input parameters.
+  track_input_configuration: null
 
 # =========================
 # Workflow control
@@ -18,32 +24,43 @@ workflow:
 # =========================
 # Algorithm parameters
 # =========================
+# Names and defaults follow Allen's beamline PV sequence (the algorithm each
+# group belongs to is given); pvfit/reconstruction_parameters.py lists them
+# and the HDF5 output records every one as reco_<name>. There are no on/off
+# flags: disable a cut with its threshold (.inf), merging with 0.
 algorithm:
-  # Track cuts
-  minTracks: 2.5
-  smear_window_size: 2
-  beamline_chi2_cut: true   # true: apply beamline chi2 cut before filling histogram
-  max_track_bl_chi2: 10.0    # threshold for beamline chi2 cut
-  z0_err_cut: true          # true: apply a max z0 error cut before filling histogram
-  pp_max_track_z0_err: 1.5  # mm
+  # Seeding histogram (pv_beamline_histo); the z/t window also selects the
+  # tracks that enter it
+  z_min: -200.0   # mm
+  z_max: 200.0
+  n_bins_z: 800
+  t_min: -0.8     # ns
+  t_max: 0.8
+  n_bins_t: 64
+  smear_window_nbins: 2             # bins on each side over which a track is spread
+  max_track_beamline_chi2_xy: 10.0  # skip tracks with a larger xy chi2 to the beamline
+  max_track_z0_err: 1.5             # mm; skip tracks with a larger z error at the beamline
 
-  # Histogram parameters
-  z_range:
-    min: -200
-    max: 200
-  t_range:
-    min: -0.8
-    max: 0.8
-  bins:
-    z: 800
-    t: 64
+  # Peak finding (pv_beamline_peak): 3x3 integral a local maximum needs at the
+  # reference binning (0.5 mm x 0.025 ns); scaled with the bin area
+  min_tracks_in_seed: 2.5
 
-  # Vertex fitting
-  max_chi2: 10  # Tukey weight threshold also threshold for track-vertex matching
-  is_adaptive_tukey: true  # true: recompute chi2 each iteration; false: use cached chi2 from initial assignment
-  drop_low_track_seeds: true  # true: remove seeds with < 4 tracks and reassign their tracks
+  # Track-seed assignment (pv_beamline_assign_tracks)
+  max_track_seed_chi2: 10.0   # a track joins its closest seed only below this chi2 to the seed
+  min_tracks_per_seed: 4      # drop seeds with fewer tracks and reassign them; 0 keeps all
 
-  # Vertex merging (post-fit)
-  merge_vertices: true  # true: merge close vertices after fitting
-  nsigma_merge: 5       # merge threshold: chi2_zt < nsigma^2 = 25 in (z,t) space
+  # Vertex fit (pv_beamline_fitter). The Tukey threshold weights the tracks in
+  # the fit and decides which assigned tracks remain members of the vertex
+  # (chi2 at the fitted position below it), as Allen writes its vertices.
+  max_chi2_tukey: 12.0
+  max_fit_iterations: 20
+  max_delta_z_converged: 0.0005  # mm
+  max_vertex_rho2: 0.09          # mm^2; drop fitted vertices farther from the beamline
 
+  # Merging (pv_beamline_merge_vertices): merge and refit vertex pairs whose
+  # (z, t) chi2 distance is below this; 0 disables merging
+  min_chi2_dist_merge: 25.0
+
+  # PVFit-only debugging switch: recompute the chi2 of every track each
+  # iteration (true, as Allen does) or reuse the one from the assignment
+  is_adaptive_tukey: true

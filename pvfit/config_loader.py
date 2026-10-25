@@ -12,6 +12,12 @@ from pathlib import Path
 
 import yaml
 
+from .reconstruction_parameters import (
+    REFERENCE_BIN_SIZE_T,
+    REFERENCE_BIN_SIZE_Z,
+    scaled_min_tracks_in_seed,
+)
+
 ANALYSIS_NAMES = (
     "efficiency_track",
     "efficiency_geo",
@@ -37,8 +43,8 @@ DEFAULT_PERFORMANCE_ANALYSES = (
 )
 
 # Reference bin sizes: z ∈ [-200, 200] / 800 and t ∈ [-0.8, 0.8] / 64.
-REF_BIN_SIZE_Z = 0.5  # mm
-REF_BIN_SIZE_T = 0.025  # ns
+REF_BIN_SIZE_Z = REFERENCE_BIN_SIZE_Z  # mm
+REF_BIN_SIZE_T = REFERENCE_BIN_SIZE_T  # ns
 
 
 def load_config(config_file):
@@ -86,11 +92,30 @@ def _check_bools(config, names, section):
             raise ValueError(f"{section}.{name} must be true or false")
 
 
-def _check_positive(config, names, section):
+def _check_positive(config, names, section, *, allow_inf=False):
+    """Positive finite numbers; thresholds whose cut can be disabled allow +inf."""
     for name in names:
         value = getattr(config, name)
+        if allow_inf and isinstance(value, float) and value == math.inf:
+            continue
         if not _is_number(value) or value <= 0:
-            raise ValueError(f"{section}.{name} must be a positive finite number")
+            kind = "positive number or .inf" if allow_inf else "positive finite number"
+            raise ValueError(f"{section}.{name} must be a {kind}")
+
+
+def _check_nonnegative(config, names, section):
+    for name in names:
+        value = getattr(config, name)
+        if not _is_number(value) or value < 0:
+            raise ValueError(f"{section}.{name} must be a nonnegative finite number")
+
+
+def _check_ints(config, names, section, *, minimum):
+    for name in names:
+        value = getattr(config, name)
+        if not _is_int(value) or value < minimum:
+            bound = "positive" if minimum > 0 else "nonnegative"
+            raise ValueError(f"{section}.{name} must be a {bound} integer")
 
 
 def _check_path(value, name):
@@ -112,33 +137,47 @@ class ReconstructionConfig:
     mc_vertex_tree_name: str
     output_dir: str
     hdf5_file: str = "fit_results.h5"
+    # configuration of the program that produced the input tracks (an Allen
+    # configuration JSON); relative paths resolve against each input file's
+    # directory. None: record no track-input parameters.
+    track_input_configuration: str | None = None
 
     # workflow
     event_number: int = -1  # -1: all events
     max_workers: int = field(default_factory=_default_workers)
 
-    # algorithm: track cuts (the YAML spells this one minTracks)
-    minTracks: float = 2.5
-    smear_window_size: int = 2
-    beamline_chi2_cut: bool = False
-    max_track_bl_chi2: float = 10.0
-    z0_err_cut: bool = False
-    pp_max_track_z0_err: float = 1.5  # mm
-
-    # algorithm: histogram
-    z_min: float = -200.0
+    # algorithm. The names and defaults are Allen's beamline PV parameters
+    # (pvfit/reconstruction_parameters.py); the HDF5 output records every one
+    # as reco_<name>. A cut is disabled by its threshold (.inf or 0), as in
+    # Allen, not by a flag.
+    #
+    # seeding histogram (pv_beamline_histo); the z/t window also selects the
+    # tracks that enter it
+    z_min: float = -200.0  # mm
     z_max: float = 200.0
-    t_min: float = -0.8
+    n_bins_z: int = 800
+    t_min: float = -0.8  # ns
     t_max: float = 0.8
-    bins_z: int = 800
-    bins_t: int = 64
-
-    # algorithm: vertex fitting and merging
-    max_chi2: float = 10.0
+    n_bins_t: int = 64
+    smear_window_nbins: int = 2
+    max_track_beamline_chi2_xy: float = 10.0  # .inf: no beamline chi2 cut
+    max_track_z0_err: float = 1.5  # mm; .inf: no z0 error cut
+    # peak finding (pv_beamline_peak); scaled with the bin area, see below
+    min_tracks_in_seed: float = 2.5
+    # track-seed assignment (pv_beamline_assign_tracks): the chi2 to the seed
+    # decides which tracks enter a seed's fit
+    max_track_seed_chi2: float = 10.0
+    min_tracks_per_seed: int = 4  # 0: keep every seed
+    # vertex fit (pv_beamline_fitter): the Tukey threshold weights the tracks
+    # in the fit and decides which of them remain members of the vertex
+    max_chi2_tukey: float = 12.0
+    max_fit_iterations: int = 20
+    max_delta_z_converged: float = 0.0005  # mm
+    max_vertex_rho2: float = 0.09  # mm^2; .inf: keep vertices off the beamline
+    # merging (pv_beamline_merge_vertices)
+    min_chi2_dist_merge: float = 25.0  # 0: no merging
+    # PVFit-only debugging switch; Allen always recomputes the chi2 (true)
     is_adaptive_tukey: bool = True
-    drop_low_track_seeds: bool = True
-    merge_vertices: bool = False
-    nsigma_merge: float = 5.0
 
     _PATH_KEYS = (
         "input_root",
@@ -146,12 +185,15 @@ class ReconstructionConfig:
         "mc_vertex_tree_name",
         "output_dir",
         "hdf5_file",
+        "track_input_configuration",
     )
     _WORKFLOW_KEYS = ("event_number", "max_workers")
     _ALGORITHM_KEYS = (
-        "minTracks", "smear_window_size", "beamline_chi2_cut", "max_track_bl_chi2",
-        "z0_err_cut", "pp_max_track_z0_err", "z_range", "t_range", "bins", "max_chi2",
-        "is_adaptive_tukey", "drop_low_track_seeds", "merge_vertices", "nsigma_merge",
+        "z_min", "z_max", "n_bins_z", "t_min", "t_max", "n_bins_t",
+        "smear_window_nbins", "max_track_beamline_chi2_xy", "max_track_z0_err",
+        "min_tracks_in_seed", "max_track_seed_chi2", "min_tracks_per_seed",
+        "max_chi2_tukey", "max_fit_iterations", "max_delta_z_converged",
+        "max_vertex_rho2", "min_chi2_dist_merge", "is_adaptive_tukey",
     )  # fmt: skip
 
     def __post_init__(self):
@@ -170,45 +212,46 @@ class ReconstructionConfig:
             or filename.name in (".", "..")
         ):
             raise ValueError("paths.hdf5_file must be a filename, not a directory path")
+        if self.track_input_configuration is not None:
+            _check_path(
+                self.track_input_configuration, "paths.track_input_configuration"
+            )
         if not _is_int(self.max_workers) or self.max_workers < 1:
             raise ValueError("workflow.max_workers must be a positive integer")
         if not _is_int(self.event_number) or self.event_number < -1:
             raise ValueError(
                 "workflow.event_number must be -1 or a nonnegative integer"
             )
+        _check_ints(
+            self, ("n_bins_z", "n_bins_t", "max_fit_iterations"), "algorithm", minimum=1
+        )
+        _check_ints(
+            self, ("smear_window_nbins", "min_tracks_per_seed"), "algorithm", minimum=0
+        )
         for axis in ("z", "t"):
-            bins = getattr(self, f"bins_{axis}")
-            if not _is_int(bins) or bins < 1:
-                raise ValueError(f"algorithm.bins.{axis} must be a positive integer")
             low, high = getattr(self, f"{axis}_min"), getattr(self, f"{axis}_max")
             if not (_is_number(low) and _is_number(high) and low < high):
-                raise ValueError(f"algorithm.{axis}_range requires min < max")
-        if not _is_int(self.smear_window_size) or self.smear_window_size < 0:
-            raise ValueError(
-                "algorithm.smear_window_size must be a nonnegative integer"
-            )
+                raise ValueError(
+                    f"algorithm.{axis}_min must be below algorithm.{axis}_max"
+                )
         _check_positive(
             self,
             (
-                "minTracks",
-                "max_track_bl_chi2",
-                "pp_max_track_z0_err",
-                "max_chi2",
-                "nsigma_merge",
+                "min_tracks_in_seed",
+                "max_track_seed_chi2",
+                "max_chi2_tukey",
+                "max_delta_z_converged",
             ),
             "algorithm",
         )
-        _check_bools(
+        _check_positive(
             self,
-            (
-                "beamline_chi2_cut",
-                "z0_err_cut",
-                "is_adaptive_tukey",
-                "drop_low_track_seeds",
-                "merge_vertices",
-            ),
+            ("max_track_beamline_chi2_xy", "max_track_z0_err", "max_vertex_rho2"),
             "algorithm",
+            allow_inf=True,
         )
+        _check_nonnegative(self, ("min_chi2_dist_merge",), "algorithm")
+        _check_bools(self, ("is_adaptive_tukey",), "algorithm")
 
     @classmethod
     def from_mapping(cls, config):
@@ -230,26 +273,11 @@ class ReconstructionConfig:
             if name not in paths:
                 raise KeyError(f"paths.{name}")
             values[name] = paths[name]
-        if "hdf5_file" in paths:
-            values["hdf5_file"] = paths["hdf5_file"]
+        for name in ("hdf5_file", "track_input_configuration"):
+            if name in paths:
+                values[name] = paths[name]
         values.update(workflow)
-        for name in cls._ALGORITHM_KEYS:
-            if name not in algorithm or name in ("z_range", "t_range", "bins"):
-                continue
-            values[name] = algorithm[name]
-        for axis in ("z", "t"):
-            limits = algorithm.get(f"{axis}_range", {})
-            if not isinstance(limits, dict):
-                raise ValueError(f"algorithm.{axis}_range must be a mapping")
-            for bound in ("min", "max"):
-                if bound in limits:
-                    values[f"{axis}_{bound}"] = limits[bound]
-        bins = algorithm.get("bins", {})
-        if not isinstance(bins, dict):
-            raise ValueError("algorithm.bins must be a mapping")
-        for axis in ("z", "t"):
-            if axis in bins:
-                values[f"bins_{axis}"] = bins[axis]
+        values.update(algorithm)
         return cls(**values)
 
     @classmethod
@@ -262,60 +290,34 @@ class ReconstructionConfig:
         return {
             "paths": {name: d[name] for name in self._PATH_KEYS},
             "workflow": {name: d[name] for name in self._WORKFLOW_KEYS},
-            "algorithm": {
-                **{
-                    name: d[name]
-                    for name in self._ALGORITHM_KEYS
-                    if name not in ("z_range", "t_range", "bins")
-                },
-                "z_range": {"min": d["z_min"], "max": d["z_max"]},
-                "t_range": {"min": d["t_min"], "max": d["t_max"]},
-                "bins": {"z": d["bins_z"], "t": d["bins_t"]},
-            },
+            "algorithm": {name: d[name] for name in self._ALGORITHM_KEYS},
         }
 
     @property
     def bin_size_z(self):
-        return (self.z_max - self.z_min) / self.bins_z
+        return (self.z_max - self.z_min) / self.n_bins_z
 
     @property
     def bin_size_t(self):
-        return (self.t_max - self.t_min) / self.bins_t
+        return (self.t_max - self.t_min) / self.n_bins_t
 
     @property
-    def m_minTracks(self):
-        """minTracks scaled by bin area relative to the reference binning.
-
-        Keeps the seeding threshold physically consistent across binnings.
-        """
-        return (
-            self.minTracks
-            * (self.bin_size_z * self.bin_size_t)
-            / (REF_BIN_SIZE_Z * REF_BIN_SIZE_T)
+    def scaled_min_tracks_in_seed(self):
+        """min_tracks_in_seed at this binning: scaled by the bin area relative
+        to the reference binning, as Allen's pv_beamline_peak does, so the peak
+        threshold stays physically consistent across binnings."""
+        return scaled_min_tracks_in_seed(
+            self.min_tracks_in_seed, self.bin_size_z, self.bin_size_t
         )
 
     def as_params(self):
-        """The parameter dict the reconstruction modules read."""
+        """The parameter dict the reconstruction modules read: every algorithm
+        key under its own name, plus the derived bin sizes and peak threshold."""
         return {
-            "m_minTracks": self.m_minTracks,
-            "smear_window_size": self.smear_window_size,
-            "zmin": self.z_min,
-            "zmax": self.z_max,
-            "tmin": self.t_min,
-            "tmax": self.t_max,
-            "Nbins_z": self.bins_z,
-            "Nbins_t": self.bins_t,
+            **{name: getattr(self, name) for name in self._ALGORITHM_KEYS},
             "bin_size_z": self.bin_size_z,
             "bin_size_t": self.bin_size_t,
-            "max_chi2": self.max_chi2,
-            "is_adaptive_tukey": self.is_adaptive_tukey,
-            "drop_low_track_seeds": self.drop_low_track_seeds,
-            "merge_vertices": self.merge_vertices,
-            "nsigma_merge": self.nsigma_merge,
-            "beamline_chi2_cut": self.beamline_chi2_cut,
-            "max_track_bl_chi2": self.max_track_bl_chi2,
-            "z0_err_cut": self.z0_err_cut,
-            "pp_max_track_z0_err": self.pp_max_track_z0_err,
+            "scaled_min_tracks_in_seed": self.scaled_min_tracks_in_seed,
         }
 
 
@@ -326,11 +328,17 @@ class AnalysisConfig:
     analyses: tuple = DEFAULT_PERFORMANCE_ANALYSES
     method_name: str = "PVfit"
 
+    # Execution only; all workers use identical event-level analysis definitions.
+    workers: int = 1
+    batches: int | None = None  # automatic: four batches per worker
+    work_dir: str | None = None  # parent for this run's private scratch directory
+    keep_columns: bool = False
+
     # reconstructed-to-true vertex matching
     recall_threshold: float = 0.7
     purity_threshold: float = 0.7
     m_r: float = 0.8
-    nsigma: float = 3.0
+    nsigma: float = 5.0
     z_scale: float = 1.5
     t_scale: float = 0.06
 
@@ -354,7 +362,9 @@ class AnalysisConfig:
     rate_plot_ymax: dict[str, float] = field(default_factory=dict)
 
     # 2D histogram plot
-    plot_event_id: int = 0
+    # None selects the first stored event; explicit selection uses source identity.
+    plot_run_number: int | None = None
+    plot_event_number: int | None = None
     draw_fixed_ellipses: bool = False
     draw_fitted_ellipses: bool = False
 
@@ -378,6 +388,15 @@ class AnalysisConfig:
         object.__setattr__(self, "analyses", analyses)
         if not isinstance(self.method_name, str) or not self.method_name.strip():
             raise ValueError("analysis.method_name must be a nonempty string")
+        for name in ("workers", "batches"):
+            value = getattr(self, name)
+            if name == "batches" and value is None:
+                continue
+            if not _is_int(value) or value < 1:
+                raise ValueError(f"analysis.{name} must be a positive integer")
+        _check_bools(self, ("keep_columns",), "analysis")
+        if self.work_dir is not None:
+            _check_path(self.work_dir, "analysis.work_dir")
         for name in ("recall_threshold", "purity_threshold"):
             value = getattr(self, name)
             if not _is_number(value) or not 0.0 <= value <= 1.0:
@@ -426,8 +445,17 @@ class AnalysisConfig:
                 raise ValueError(
                     f"analysis.rate_plot_ymax.{key} must be a positive finite number"
                 )
-        if not _is_int(self.plot_event_id) or self.plot_event_id < 0:
-            raise ValueError("analysis.plot_event_id must be a nonnegative integer")
+        if (self.plot_run_number is None) != (self.plot_event_number is None):
+            raise ValueError(
+                "analysis.plot_run_number and analysis.plot_event_number "
+                "must both be set or both be null"
+            )
+        for name in ("plot_run_number", "plot_event_number"):
+            value = getattr(self, name)
+            if value is not None and (not _is_int(value) or value < 0):
+                raise ValueError(
+                    f"analysis.{name} must be a nonnegative integer or null"
+                )
         if self.plot_min_ntracks > self.plot_max_ntracks:
             raise ValueError(
                 "analysis.plot_min_ntracks must not exceed plot_max_ntracks"
@@ -445,6 +473,12 @@ class AnalysisConfig:
         """Build from a parsed analysis YAML; missing keys use defaults."""
         section = _section(config, "analysis")
         paths = _section(config, "paths")
+        if "plot_event_id" in section:
+            raise ValueError(
+                "analysis.plot_event_id has been removed; use plot_run_number and "
+                "plot_event_number with the original run/event identity, or leave "
+                "both null to plot the first stored event"
+            )
         _reject_unknown(section, "analysis", cls.analysis_keys())
         _reject_unknown(paths, "paths", cls._PATH_KEYS)
         return cls(**section, **paths)

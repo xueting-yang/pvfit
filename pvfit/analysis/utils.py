@@ -1,5 +1,7 @@
 """Utility functions for vertex reconstruction performance analysis."""
 
+from collections import deque
+
 import numpy as np
 from scipy.stats import beta, norm
 
@@ -104,6 +106,7 @@ def match_vertices_elliptical_zt(
         This function adds the following keys in-place:
             - 'matched_true_vertices'
             - 'closest_true_vertex'
+            - 'matched_true_distances' (true ID to squared normalized distance)
             - 'n_matches'
 
     true_vertices : list of dict
@@ -132,6 +135,7 @@ def match_vertices_elliptical_zt(
         rec_t = rec["rec_t"]
 
         matched = []
+        distances = {}
         closest: dict | None = None
         min_dist = float("inf")
 
@@ -145,12 +149,14 @@ def match_vertices_elliptical_zt(
 
                 # Distance metric for closest match
                 dist = (dz / sigma_z) ** 2 + (dt / sigma_t) ** 2
+                distances[tru["vertex_id"]] = dist
                 if dist < min_dist:
                     min_dist = dist
                     closest = tru
 
         rec["matched_true_vertices"] = matched
         rec["closest_true_vertex"] = closest
+        rec["matched_true_distances"] = distances
         rec["n_matches"] = len(matched)
 
 
@@ -170,6 +176,9 @@ def match_vertices_resolution_zt(
     i.e. an ellipse with semi-axes:
         a_z = nsigma * z_err
         a_t = nsigma * t_err
+
+    Adds the same match fields as ``match_vertices_elliptical_zt``, including
+    ``matched_true_distances`` for all in-ellipse candidates.
 
     Parameters
     ----------
@@ -201,6 +210,7 @@ def match_vertices_resolution_zt(
         if z_err is None or t_err is None or z_err <= 0 or t_err <= 0:
             rec["matched_true_vertices"] = []
             rec["closest_true_vertex"] = None
+            rec["matched_true_distances"] = {}
             rec["n_matches"] = 0
             continue
 
@@ -208,6 +218,7 @@ def match_vertices_resolution_zt(
         sigma_t = nsigma * t_err
 
         matched = []
+        distances = {}
         closest: dict | None = None
         min_dist = float("inf")
 
@@ -220,6 +231,7 @@ def match_vertices_resolution_zt(
 
             if val <= 1.0:
                 matched.append(tru)
+                distances[tru["vertex_id"]] = val
 
                 # --- normalized distance ---
                 if val < min_dist:
@@ -228,7 +240,77 @@ def match_vertices_resolution_zt(
 
         rec["matched_true_vertices"] = matched
         rec["closest_true_vertex"] = closest
+        rec["matched_true_distances"] = distances
         rec["n_matches"] = len(matched)
+
+
+def claim_vertex_matches(rec_vertices):
+    """Return event-local {rec_id: true_id} claims by true-vertex proposals.
+
+    Each unmatched true vertex applies to its next reconstructed candidate in
+    increasing squared normalized distance. A rec keeps its closest applicant,
+    replacing its current owner if a better true arrives later. Rejected or
+    displaced true vertices continue until matched or out of candidates.
+
+    Equal distances prefer the smaller rec ID for a true's candidates and the
+    smaller true ID for a rec's applicants. Both sides thus use the same pair
+    priority (distance, rec_id, true_id). The result equals globally sorted
+    greedy matching, but does not maximize the number of pairs.
+
+    Every candidate pair is proposed at most once, with no iteration/retry cap.
+    Input candidate metadata is read only, preserving merge/split associations.
+    """
+    # candidates[true_id]: that true's eligible (distance, rec_id) options.
+    # distances_by_rec[rec_id]: read-only true_id -> distance lookup, used to
+    # compare a new applicant with the rec's current owner.
+    candidates = {}
+    distances_by_rec = {}
+    for rec in rec_vertices:  # One reconstructed vertex and its candidate data.
+        rec_id = rec["rec_vertex_id"]  # Event-local reconstructed vertex ID.
+        distances = rec["matched_true_distances"]  # Precomputed in-window scores.
+        distances_by_rec[rec_id] = distances
+        for true_id, distance in distances.items():
+            # true_id identifies a true vertex; distance is the squared
+            # normalized separation of this particular true/rec pair.
+            candidates.setdefault(true_id, []).append((distance, rec_id))
+    for options in candidates.values():
+        # Each true tries closer recs first; equal scores prefer smaller IDs.
+        options.sort()
+
+    # next_index[true_id]: first candidate this true has not yet tried.
+    next_index = dict.fromkeys(candidates, 0)
+    # pending contains only unmatched true IDs waiting for another attempt.
+    # Trues with no eligible candidate need no attempt and are absent here.
+    pending = deque(sorted(candidates))
+    # matches[rec_id]: the true provisionally held by this rec; a missing key
+    # means the rec is free. An accepted true leaves pending until displaced.
+    matches = {}
+
+    while pending:
+        true_id = pending.popleft()  # Unmatched true making the next proposal.
+        index = next_index[true_id]  # Its next untried candidate's position.
+        if index == len(candidates[true_id]):
+            continue  # Exhausted candidates: leave this true unmatched.
+
+        distance, rec_id = candidates[true_id][index]
+        # Advance before applying, so rejection or displacement never causes
+        # this true to repeat a proposal it has already made.
+        next_index[true_id] += 1
+        previous_true_id = matches.get(rec_id)  # Current owner, or None if free.
+
+        if previous_true_id is None:
+            matches[rec_id] = true_id  # Free rec accepts; true stops queuing.
+        else:
+            previous_distance = distances_by_rec[rec_id][previous_true_id]
+            # rec_id is identical for both applicants, so their common pair
+            # priority reduces to (distance, true_id) for this comparison.
+            if (distance, true_id) < (previous_distance, previous_true_id):
+                matches[rec_id] = true_id  # Later, better applicant takes over.
+                pending.append(previous_true_id)  # Displaced owner tries next.
+            else:
+                pending.append(true_id)  # Rejected applicant tries next.
+
+    return matches
 
 
 def find_best_match(

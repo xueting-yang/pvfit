@@ -1,6 +1,7 @@
 """Merge-pair combinatorics and signed projections of known true vertices."""
 
 import csv
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,9 @@ from pvfit.analysis.analyze_merge_distance import (
     analyze_merge_distance,
     collect_merge_pairs,
 )
+from pvfit.analysis.run_analysis import run_analysis
+from pvfit.config_loader import AnalysisConfig
+from tests.test_rate_analyses import write_events
 
 
 def event(event_id, true, rec, z, t):
@@ -26,6 +30,33 @@ def event(event_id, true, rec, z, t):
 
 
 class MergeDistanceTests(unittest.TestCase):
+    def test_pipeline_serial_and_parallel_use_batch_columns(self):
+        true = [
+            {"z": 0.5, "t": 0.01, "tracks": {0, 1, 2, 3}},
+            {"z": -0.5, "t": -0.01, "tracks": {4, 5, 6, 7}},
+        ]
+        rec = [{"z": 0, "t": 0, "tracks": set(range(8))}] * 2
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "input.h5"
+            write_events(path, [(true, rec), (true, rec)])
+            outputs = []
+            for workers in (1, 2):
+                output = root / str(workers)
+                settings = AnalysisConfig(
+                    analyses=("merge_rate",), workers=workers, batches=2
+                )
+                with patch(
+                    "pvfit.analysis.analyze_merge_distance.collect_merge_pairs",
+                    side_effect=AssertionError("must not rescan HDF5"),
+                ):
+                    run_analysis(str(path), str(output), settings)
+                stem = output / "merge_distance_pvfit_track_based"
+                summary = json.loads(stem.with_suffix(".json").read_text())
+                self.assertEqual(summary["pair_count"], 2)
+                outputs.append(stem.with_suffix(".csv").read_bytes())
+            self.assertEqual(*outputs)
+
     def test_multi_merge_deduplicated_per_event_and_signed_by_index(self):
         events = [
             event(

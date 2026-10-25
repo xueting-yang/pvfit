@@ -14,7 +14,7 @@ FINGERPRINT_KEYS = ("inputs", "implementation")
 
 
 def input_fingerprint(input_pattern, root):
-    """Identity of the ROOT files ``input_pattern`` resolves to right now.
+    """Identity of the input files ``input_pattern`` resolves to right now.
 
     The path string alone does not tell whether a file was regenerated in
     place or whether a glob picked up new files, so size and modification time
@@ -22,7 +22,7 @@ def input_fingerprint(input_pattern, root):
     """
     matches = sorted(glob.glob(str(Path(root) / Path(input_pattern).expanduser())))
     if not matches:
-        raise FileNotFoundError(f"No ROOT files matched input_root: {input_pattern}")
+        raise FileNotFoundError(f"No input files matched: {input_pattern}")
     files = []
     for match in matches:
         path = Path(match).resolve()
@@ -82,9 +82,8 @@ def load_optimization_settings(config_path, overrides=None):
         )
     }
     settings["study_name"] = study["name"]
-    settings.update(
-        {name: execution[name] for name in ("trial_workers", "all_input_files")}
-    )
+    settings["trial_workers"] = execution.get("trial_workers", 1)
+    settings["all_input_files"] = execution["all_input_files"]
     settings["backend"] = execution.get("backend", "pvfit")
     for name, value in (overrides or {}).items():
         if name in settings and value is not None:
@@ -120,6 +119,11 @@ def load_optimization_settings(config_path, overrides=None):
         raise ValueError(
             f"backend '{backend.name}' allows at most {limit} parallel trial(s); "
             f"n_jobs is {settings['n_jobs']}"
+        )
+    worker_limit = backend.max_trial_workers
+    if worker_limit is not None and settings["trial_workers"] > worker_limit:
+        raise ValueError(
+            f"backend '{backend.name}' allows at most {worker_limit} trial_workers"
         )
     validate_search_space(config.get("search_space"), backend)
     settings["search_space"] = config["search_space"]

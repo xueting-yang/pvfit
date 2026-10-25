@@ -6,6 +6,7 @@ trial then runs ``pvfit analyze`` on that file and reads the objectives from
 the analysis CSVs, so every backend is scored identically.
 """
 
+import copy
 import csv
 import glob
 import json
@@ -26,9 +27,9 @@ from .constants import AUDIT_SPECS, OBJECTIVE_SPECS, REQUIRED_ANALYSES
 def resolve_trial_input_root(
     input_pattern: str, use_first_input_file: bool, root: Path
 ) -> str:
-    """Resolve the input ROOT pattern for trials.
+    """Resolve the backend input pattern (PVFit ROOT or Allen MDF) for trials.
 
-    By default we use the first matching ROOT file for faster exploratory scans.
+    By default we use the first matching input file for faster exploratory scans.
     Pass --all-input-files to keep the full baseline pattern.
     """
     if not use_first_input_file:
@@ -36,9 +37,7 @@ def resolve_trial_input_root(
 
     matches = sorted(glob.glob(str(root / input_pattern)))
     if not matches:
-        raise FileNotFoundError(
-            f"No ROOT files matched input_root pattern: {input_pattern}"
-        )
+        raise FileNotFoundError(f"No input files matched pattern: {input_pattern}")
 
     first_match = Path(matches[0]).resolve()
     try:
@@ -156,6 +155,14 @@ def sample_params(trial: optuna.Trial, search_space: dict) -> dict:
     return sampled
 
 
+def backend_analysis_config(analysis_cfg, backend):
+    """Share evaluation cuts while letting the backend name its own outputs."""
+    result = copy.deepcopy(analysis_cfg)
+    if backend.analysis_method_name is not None:
+        result.setdefault("analysis", {})["method_name"] = backend.analysis_method_name
+    return result
+
+
 def write_trial_analysis_config(analysis_cfg: dict, trial_dir: Path) -> Path:
     """Keep evaluation thresholds fixed while varying reconstruction parameters."""
     settings = replace(
@@ -199,18 +206,26 @@ def make_objective(
     analysis_cfg: dict,
     search_space: dict,
 ):
+    analysis_cfg = backend_analysis_config(analysis_cfg, backend)
+
     def objective(trial: optuna.Trial) -> tuple[float, float, float, float]:
         sampled = sample_params(trial, search_space)
         trial_dir = study_dir / f"trial_{trial.number}"
         trial_dir.mkdir(parents=True, exist_ok=True)
         for name in ("stdout.log", "stderr.log"):
             (trial_dir / name).write_text("")
-        config_path = backend.write_config(
-            base_cfg, sampled, trial_dir, trial_workers, input_root
-        )
-        analysis_config_path = write_trial_analysis_config(analysis_cfg, trial_dir)
-
-        derived = backend.derived(sampled, base_cfg)
+        derived = {}
+        try:
+            config_path = backend.write_config(
+                base_cfg, sampled, trial_dir, trial_workers, input_root
+            )
+            analysis_config_path = write_trial_analysis_config(analysis_cfg, trial_dir)
+            derived = backend.derived(sampled, base_cfg)
+        except (RuntimeError, OSError, KeyError, ValueError) as exc:
+            write_failure_metadata(
+                trial_dir, trial.number, "configuration", exc, sampled, derived
+            )
+            raise
         generation = get_live_trial_generation(trial)
         param_sig = param_signature(sampled)
         for key, value in derived.items():

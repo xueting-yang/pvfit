@@ -1,8 +1,8 @@
 # PVFit
 
-PVFit is a Python environment for developing 4D primary vertex reconstruction
-algorithms in three spatial coordinates and time, and evaluating their performance
-for LHCb Upgrade-II style studies before porting them to GPUs.
+PVFit is a Python package for reconstructing primary vertices in three spatial
+coordinates and time, evaluating reconstruction performance, and optimizing
+algorithm parameters. It was developed for LHCb Upgrade-II studies.
 
 ## How it works
 
@@ -15,8 +15,8 @@ The pipeline has two stages joined by a single HDF5 file:
 2. **Analysis** — read that HDF5 and produce performance plots and summary
    tables: efficiency, fake, merge and split rates, resolution, and pulls.
 
-You can rerun analyses on an existing HDF5 file without repeating the fit.
-`pvfit optimize` scans reconstruction parameters with Optuna.
+The HDF5 file lets you rerun analyses without repeating the fit. Analysis
+supports one or [multiple worker processes](docs/usage.md#parallel-analysis).
 
 ## Installation
 
@@ -58,27 +58,33 @@ outside a checkout; `pvfit init-config` exports editable YAML templates.
 
 ## Using your own data
 
-PVFit reads Allen monitoring ROOT files with a track tree and an MC truth vertex
-tree; the defaults are `velo_kalman_filter/monitor_tree` and
-`mc_pv_dumper/MCPV_effective_tree`.
-Both trees must carry `run_number` and `event_number`, and truth association
-requires track `mc_key` values and the truth vertex membership keys.
-Pass your file or a quoted glob to `--input`, or set `paths.input_root` in
-[configs/reconstruction.yaml](configs/reconstruction.yaml); adjust the independent
-[analysis configuration](configs/analysis.yaml) for evaluation and plots.
+For Python reconstruction, pass your ROOT file or a quoted glob to `fit --input`,
+or set `paths.input_root` in [configs/reconstruction.yaml](configs/reconstruction.yaml).
+The input must follow the documented [track and truth format](docs/data-format.md#root-input).
+To evaluate results from another reconstruction program, write them in the
+[HDF5 analysis format](docs/data-format.md#hdf5-layout) and run `pvfit analyze`
+without running the PVFit fitter. Choose metrics and plotting settings in the
+separate [analysis configuration](configs/analysis.yaml).
+
+## Working with Allen
+
+PVFit can also evaluate and optimize Allen's GPU reconstruction:
+
+- **Import results** — `pvfit convert-allen` converts Allen's reconstructed
+  vertices from monitoring ROOT files to HDF5 for the same performance analysis.
+  See [commands and input requirements](docs/usage.md#evaluating-allen-output).
+- **Optimize parameters** — `pvfit optimize` tunes runtime PV parameters in an
+  existing Allen build, with support for running a complete study in one Condor
+  GPU job. See [setup and execution](docs/optimization.md#optimizing-allen).
 
 ## Documentation
 
 - [Usage and configuration](docs/usage.md): CLI commands, Snakemake and YAML settings.
+- [Data formats](docs/data-format.md): ROOT inputs, event identity and the HDF5 interface for other producers.
 - [Synthetic example](docs/toy.md): generation, calibration and limitations.
 - [Analysis](docs/analysis.md): matching, metric definitions, output files and track diagnostics.
 - [Optimization](docs/optimization.md): scans, input selection, study resume and backends.
 - [Derivations](docs/derivations/README.md): mathematical reference notes and notebooks.
-
-### HDF5 layout
-
-See [data formats](docs/data-format.md) for the complete ROOT input requirements,
-event numbering, truth association and HDF5 schema for compatible producers.
 
 ## Development
 
@@ -91,7 +97,10 @@ uv run python scripts/check_docs.py
 ```
 
 The implementation lives in `pvfit/fit/`, `pvfit/analysis/`, `pvfit/toy/` and
-`pvfit/optimize/`; `pvfit/cli.py` provides the command-line entry point.
+`pvfit/optimize/`, with the Allen import in `pvfit/convert_allen.py`, the Allen
+configuration mapping in `pvfit/allen.py` and the shared reconstruction
+parameter record in `pvfit/reconstruction_parameters.py`; `pvfit/cli.py`
+provides the command-line entry point.
 CI runs these checks and verifies a wheel installation outside the checkout.
 The [synthetic regression](tests/data/README.md) freezes numerical behavior
 without shipping reference events. See the [changelog](CHANGELOG.md) for releases

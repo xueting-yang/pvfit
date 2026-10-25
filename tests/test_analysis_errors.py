@@ -5,8 +5,8 @@ import unittest
 import numpy as np
 from scipy.stats import norm
 
-from pvfit.analysis.analyze_track_pull import _statistics
-from pvfit.analysis.analyze_vertex_pull import summarize_vertex_pulls
+from pvfit.analysis.moments import Moments
+from pvfit.analysis.residual_accumulators import _summary_from
 from pvfit.analysis.utils import (
     ONE_SIGMA_TAIL,
     calculate_clopper_pearson_errors,
@@ -69,25 +69,31 @@ class ClopperPearsonTests(unittest.TestCase):
         self.assertAlmostEqual(upper, expected, delta=0.02 * expected)
 
 
+def pull_summary(values, *, population_std=False):
+    values = np.asarray(values)
+    quantiles = np.quantile(values, [0.16, 0.84]) if len(values) else (None, None)
+    return _summary_from(Moments.of(values), quantiles, population_std=population_std)
+
+
 class PullSummaryTests(unittest.TestCase):
     def test_track_pull_statistics_carry_errors(self):
-        stats = _statistics(np.array([1.0, 2.0, 3.0, 4.0]))
+        stats = pull_summary([1.0, 2.0, 3.0, 4.0], population_std=True)
         self.assertEqual(stats["n"], 4)
         self.assertEqual(stats["mean"], 2.5)
         self.assertAlmostEqual(stats["mean_error"], np.std([1, 2, 3, 4], ddof=1) / 2)
         self.assertIsNotNone(stats["std_error"])
-        single = _statistics(np.array([4.0]))
+        single = pull_summary([4.0], population_std=True)
         self.assertEqual(single["mean"], 4.0)
         self.assertIsNone(single["mean_error"])
         self.assertIsNone(single["std_error"])
-        empty = _statistics(np.array([]))
+        empty = pull_summary([], population_std=True)
         self.assertIsNone(empty["mean_error"])
         self.assertIsNone(empty["std_error"])
 
     def test_vertex_pull_summary_uses_all_entries(self):
         rng = np.random.default_rng(6)
         pulls = np.concatenate([rng.normal(0, 1, 5000), [50.0]])  # one far outlier
-        summary = summarize_vertex_pulls({"pull_x": pulls})["pull_x"]
+        summary = pull_summary(pulls)
         self.assertEqual(summary["n"], 5001)
         self.assertIsNotNone(summary["std_error"])
         self.assertAlmostEqual(summary["central68_half_width"], 1.0, delta=0.05)

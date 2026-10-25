@@ -82,6 +82,9 @@ class CLITests(unittest.TestCase):
     def test_bad_cli_values_fail_before_execution(self):
         for args in (
             ["fit", "-w", "0"],
+            ["analyze", "--workers", "0"],
+            ["analyze", "--batches", "-1"],
+            ["run", "--analysis-workers", "0"],
             ["fit", "-e", "-2"],
             ["analyze", "-a", "not_an_analysis"],
             ["fit", "--analyses", "resolution"],
@@ -112,7 +115,8 @@ class CLITests(unittest.TestCase):
         options = analyze.call_args.args[0]
         self.assertEqual(options["hdf5_file"], str(self.input))
         self.assertEqual(options["settings"].analyses, ("resolution",))
-        self.assertFalse(hasattr(options["settings"], "m_minTracks"))
+        self.assertEqual(options["settings"].nsigma, 5.0)
+        self.assertFalse(hasattr(options["settings"], "min_tracks_in_seed"))
         self.assertTrue((self.output / "analysis.done").is_file())
 
     def test_analysis_only_config_and_overrides(self):
@@ -145,6 +149,45 @@ class CLITests(unittest.TestCase):
         self.assertEqual(options["settings"].purity_threshold, 0.8)
         self.assertEqual(options["settings"].method_name, "ExternalReco")
         self.assertFalse(hasattr(options["settings"], "max_chi2"))
+
+    def test_analysis_execution_cli_overrides_yaml(self):
+        self.write_config(
+            {"analysis": {"workers": 2, "batches": 3, "keep_columns": True}}
+        )
+        with patch("pvfit.cli._run_analysis") as analyze:
+            code, _, stderr = self.invoke(
+                [
+                    "analyze",
+                    "--input",
+                    str(self.input),
+                    "--output",
+                    str(self.output),
+                    "--config",
+                    str(self.config),
+                    "--workers",
+                    "4",
+                    "--batches",
+                    "7",
+                    "--analysis-work-dir",
+                    str(self.root / "scratch"),
+                    "--no-keep-analysis-columns",
+                ]
+            )
+        self.assertEqual((code, stderr), (0, ""))
+        settings = analyze.call_args.args[0]["settings"]
+        self.assertEqual((settings.workers, settings.batches), (4, 7))
+        self.assertEqual(settings.work_dir, str(self.root / "scratch"))
+        self.assertFalse(settings.keep_columns)
+
+    def test_run_keeps_fit_and_analysis_workers_independent(self):
+        self.write_config(self.fit_config())
+        code, fit, analyze = self.run_with_mocked_stages(
+            "--max-workers", "2", "--analysis-workers", "3", "--analysis-batches", "5"
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(fit.call_args.args[0]["max_workers"], 2)
+        settings = analyze.call_args.args[0]["settings"]
+        self.assertEqual((settings.workers, settings.batches), (3, 5))
 
     def test_analysis_uses_configured_hdf5_and_output(self):
         self.write_config(
@@ -284,7 +327,7 @@ class CLITests(unittest.TestCase):
 
     def test_run_keeps_fit_and_analysis_parameters_separate(self):
         config = self.fit_config()
-        config["algorithm"]["max_chi2"] = 4
+        config["algorithm"]["max_chi2_tukey"] = 4
         self.write_config(config)
         self.analysis_config.write_text(
             yaml.safe_dump(
@@ -298,12 +341,32 @@ class CLITests(unittest.TestCase):
         )
         code, fit, analyze = self.run_with_mocked_stages()
         self.assertEqual(code, 0)
-        self.assertEqual(fit.call_args.args[0]["params"]["max_chi2"], 4)
+        self.assertEqual(fit.call_args.args[0]["params"]["max_chi2_tukey"], 4)
         self.assertNotIn("purity_threshold", fit.call_args.args[0]["params"])
         settings = analyze.call_args.args[0]["settings"]
         self.assertFalse(hasattr(settings, "max_chi2"))
         self.assertEqual(settings.purity_threshold, 0.9)
         self.assertEqual(settings.analyses, ("track_pull",))
+
+    def test_fit_records_the_track_input_configuration_only_when_named(self):
+        config = self.fit_config()
+        (self.root / "allen_configuration.json").write_text(
+            json.dumps({"velo_kalman_filter": {"hit_time_resolution_ns": 0.05}})
+        )
+        self.write_config(config)
+        code, fit, _ = self.run_with_mocked_stages()
+        self.assertEqual(code, 0)
+        self.assertIsNone(fit.call_args.args[0]["track_input"])
+        config["paths"]["track_input_configuration"] = "allen_configuration.json"
+        self.write_config(config)
+        code, fit, _ = self.run_with_mocked_stages()
+        self.assertEqual(code, 0)
+        parameters, attributes = fit.call_args.args[0]["track_input"]
+        self.assertEqual(parameters, {"hit_time_resolution_ns": 0.05})
+        self.assertEqual(
+            attributes["track_input_configuration_path"],
+            str((self.root / "allen_configuration.json").resolve()),
+        )
 
     def test_fit_does_not_load_analysis_configuration(self):
         self.write_config(self.fit_config())

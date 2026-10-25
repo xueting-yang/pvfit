@@ -93,7 +93,7 @@ def summarize(output, settings, directory):
             events[name] = result
     with ExitStack() as stack:
         for function in ("plot_efficiency_lhcb2", "plot_rate_lhcb2"):
-            stack.enter_context(patch(f"pvfit.analysis.run_analysis.{function}"))
+            stack.enter_context(patch(f"pvfit.analysis.driver.{function}"))
         run_analysis(output, str(directory), settings)
     rates = {}
     for path in sorted(directory.glob("*.csv")):

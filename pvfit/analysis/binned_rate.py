@@ -10,7 +10,6 @@ run_analysis applies to every result in the same way.
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import h5py
 import matplotlib.pyplot as plt
 import mplhep as hep
 import numpy as np
@@ -67,36 +66,6 @@ class EventVertices:
     rec_t_err: np.ndarray
 
 
-def _optional(group, name):
-    return group[name][:] if name in group else None
-
-
-def iter_events(hdf5_path):
-    """Yield EventVertices for every event in the file, in event order."""
-    with h5py.File(hdf5_path, "r") as f:
-        for event_id in sorted(int(key) for key in f):
-            group = f[str(event_id)]
-            true = group["true_vertices"]
-            rec = group["rec_vertices"]
-            yield EventVertices(
-                event_id=event_id,
-                true_tracks=[set(idx) for idx in true["track_indices"][:]],
-                true_x=_optional(true, "x"),
-                true_y=_optional(true, "y"),
-                true_z=true["z"][:],
-                true_t=true["t"][:],
-                rec_tracks=[set(idx) for idx in rec["track_indices"][:]],
-                rec_x=_optional(rec, "x"),
-                rec_y=_optional(rec, "y"),
-                rec_z=rec["z"][:],
-                rec_t=rec["t"][:],
-                rec_x_err=_optional(rec, "x_err"),
-                rec_y_err=_optional(rec, "y_err"),
-                rec_z_err=_optional(rec, "z_err"),
-                rec_t_err=_optional(rec, "t_err"),
-            )
-
-
 def track_matched_pairs(event, recall_threshold, purity_threshold):
     """(true_id, rec_id) for every reconstructed vertex with an overlap match.
 
@@ -118,36 +87,176 @@ def track_matched_pairs(event, recall_threshold, purity_threshold):
 
 
 class BinnedCounts:
-    """Numerator and denominator per track-multiplicity bin."""
+    """Full-population and binned counts, with event-level error statistics.
+
+    Overall counts include every object passed to ``add``, independently of
+    the plotting bins. Underflow and overflow counts document the populations
+    outside those bins without changing the per-bin tables or figures.
+
+    Vertices of one event are not independent Bernoulli trials: a merge marks
+    two true vertices at once, a split two reconstructed fragments, a busy
+    event can produce several fakes. ``add`` counts objects; ``end_event``
+    closes the current event and accumulates, per bin and overall, the sums
+    Σs_e², Σs_e·n_e and Σn_e² of its successes s_e and trials n_e. From them
+    the ratio-estimator (cluster) variance Σ(s_e − p̂·n_e)² / N² is compared
+    with the binomial variance p̂(1−p̂)/N; the ratio of their square roots is
+    the *design effect*, by which the Clopper-Pearson interval is widened (never
+    narrowed). Without ``end_event`` calls the design effect is 1 and the
+    intervals are the plain binomial ones.
+    """
+
+    _STATS = ("sum_ss", "sum_sn", "sum_nn")
+    _TOTALS = (
+        "total_numerator",
+        "total_denominator",
+        "total_ss",
+        "total_sn",
+        "total_nn",
+        "underflow_numerator",
+        "underflow_denominator",
+        "overflow_numerator",
+        "overflow_denominator",
+    )
 
     def __init__(self, bins):
         self.bins = list(bins)
+        if not self.bins or any(
+            end < start or (i and start != self.bins[i - 1][1] + 1)
+            for i, (start, end) in enumerate(self.bins)
+        ):
+            raise ValueError("Rate bins must be nonempty, ordered and contiguous")
         self.denominator = dict.fromkeys(self.bins, 0)
         self.numerator = dict.fromkeys(self.bins, 0)
+        self.sum_ss = dict.fromkeys(self.bins, 0)
+        self.sum_sn = dict.fromkeys(self.bins, 0)
+        self.sum_nn = dict.fromkeys(self.bins, 0)
+        for name in self._TOTALS:
+            setattr(self, name, 0)
+        self._event_total_s = self._event_total_n = 0
+        self._event_s = {}
+        self._event_n = {}
 
     def add(self, n_tracks, success):
-        """Count one object in its bin; objects outside every bin are ignored."""
+        """Count every object overall, and in its bin when one exists."""
+        success = int(bool(success))
+        self.total_denominator += 1
+        self.total_numerator += success
+        self._event_total_n += 1
+        self._event_total_s += success
+        if n_tracks < self.bins[0][0]:
+            self.underflow_denominator += 1
+            self.underflow_numerator += success
+            return
+        if n_tracks > self.bins[-1][1]:
+            self.overflow_denominator += 1
+            self.overflow_numerator += success
+            return
         bin_ = find_bin(self.bins, n_tracks)
         if bin_ is not None:
             self.denominator[bin_] += 1
+            self._event_n[bin_] = self._event_n.get(bin_, 0) + 1
             if success:
                 self.numerator[bin_] += 1
+                self._event_s[bin_] = self._event_s.get(bin_, 0) + 1
+
+    def end_event(self):
+        """Close the current event: fold its per-bin successes and trials into
+        the cluster sums. Call once per event after all ``add`` calls."""
+        for bin_, n in self._event_n.items():
+            s = self._event_s.get(bin_, 0)
+            self.sum_ss[bin_] += s * s
+            self.sum_sn[bin_] += s * n
+            self.sum_nn[bin_] += n * n
+        # Include events wholly outside the bins and cross-bin correlations.
+        total_s, total_n = self._event_total_s, self._event_total_n
+        self.total_ss += total_s * total_s
+        self.total_sn += total_s * total_n
+        self.total_nn += total_n * total_n
+        self._event_total_s = self._event_total_n = 0
+        self._event_s = {}
+        self._event_n = {}
 
     @staticmethod
-    def _rate(numerator, denominator):
+    def design_effect(numerator, denominator, ss, sn, nn):
+        """sqrt(cluster variance / binomial variance), at least 1."""
+        if denominator <= 0 or numerator <= 0 or numerator >= denominator:
+            return 1.0
+        p = numerator / denominator
+        cluster = (ss - 2.0 * p * sn + p * p * nn) / denominator**2
+        binomial = p * (1.0 - p) / denominator
+        if cluster <= 0.0 or binomial <= 0.0:
+            return 1.0
+        return max(1.0, float(np.sqrt(cluster / binomial)))
+
+    @staticmethod
+    def _rate(numerator, denominator, deff=1.0):
         rate = numerator / denominator if denominator > 0 else 0.0
         lower, upper = calculate_clopper_pearson_errors(numerator, denominator, rate)
-        return rate, lower, upper
+        return rate, deff * lower, deff * upper
+
+    def bin_design_effect(self, bin_):
+        return self.design_effect(
+            self.numerator[bin_],
+            self.denominator[bin_],
+            self.sum_ss[bin_],
+            self.sum_sn[bin_],
+            self.sum_nn[bin_],
+        )
+
+    def overall_design_effect(self):
+        return self.design_effect(
+            self.total_numerator,
+            self.total_denominator,
+            self.total_ss,
+            self.total_sn,
+            self.total_nn,
+        )
 
     def rate(self, bin_):
-        """(rate, error_lower, error_upper) of one bin."""
-        return self._rate(self.numerator[bin_], self.denominator[bin_])
+        """(rate, error_lower, error_upper) of one bin, errors widened by the
+        bin's design effect."""
+        return self._rate(
+            self.numerator[bin_], self.denominator[bin_], self.bin_design_effect(bin_)
+        )
 
     def overall(self):
-        """(rate, error_lower, error_upper, numerator, denominator) over all bins."""
-        numerator = sum(self.numerator.values())
-        denominator = sum(self.denominator.values())
-        return (*self._rate(numerator, denominator), numerator, denominator)
+        """Rate, errors and counts for all objects, including under/overflow."""
+        numerator = self.total_numerator
+        denominator = self.total_denominator
+        return (
+            *self._rate(numerator, denominator, self.overall_design_effect()),
+            numerator,
+            denominator,
+        )
+
+    def coverage(self):
+        """Counts and rates outside the actual inclusive bin boundaries.
+
+        ``fraction`` is the share of the full denominator in that region;
+        ``rate`` is its own success fraction, undefined for an empty region.
+        """
+        result = {
+            "bin_min_ntracks": self.bins[0][0],
+            "bin_max_ntracks": self.bins[-1][1],
+            "binned_numerator": sum(self.numerator.values()),
+            "binned_denominator": sum(self.denominator.values()),
+        }
+        for region in ("underflow", "overflow"):
+            numerator = getattr(self, f"{region}_numerator")
+            denominator = getattr(self, f"{region}_denominator")
+            result.update(
+                {
+                    f"{region}_numerator": numerator,
+                    f"{region}_denominator": denominator,
+                    f"{region}_rate": numerator / denominator
+                    if denominator
+                    else float("nan"),
+                    f"{region}_fraction": denominator / self.total_denominator
+                    if self.total_denominator
+                    else float("nan"),
+                }
+            )
+        return result
 
     def table(self):
         """One row per bin, including empty bins."""
@@ -164,9 +273,48 @@ class BinnedCounts:
                     "error_upper": upper,
                     "denominator": self.denominator[start, end],
                     "numerator": self.numerator[start, end],
+                    "design_effect": self.bin_design_effect((start, end)),
                 }
             )
         return pd.DataFrame(rows)
+
+    # ---- batch serialisation -------------------------------------------------
+
+    def to_dict(self):
+        """Integer sums per bin and overall, in bin order; JSON-serialisable."""
+        return {
+            "numerator": [self.numerator[b] for b in self.bins],
+            "denominator": [self.denominator[b] for b in self.bins],
+            **{
+                name: [getattr(self, name)[b] for b in self.bins]
+                for name in self._STATS
+            },
+            "totals": [int(getattr(self, name)) for name in self._TOTALS],
+        }
+
+    @classmethod
+    def from_dict(cls, bins, data):
+        counts = cls(bins)
+        for name in ("numerator", "denominator", *cls._STATS):
+            values = data[name]
+            target = getattr(counts, name)
+            for bin_, value in zip(counts.bins, values, strict=True):
+                target[bin_] = int(value)
+        for name, value in zip(cls._TOTALS, data["totals"], strict=True):
+            setattr(counts, name, int(value))
+        return counts
+
+    @staticmethod
+    def merge_dicts(parts):
+        """Sum the serialised sums of several batches (all exact integers)."""
+        parts = list(parts)
+        merged = {}
+        for name in ("numerator", "denominator", *BinnedCounts._STATS, "totals"):
+            merged[name] = [
+                int(sum(values))
+                for values in zip(*(p[name] for p in parts), strict=True)
+            ]
+        return merged
 
 
 @dataclass
@@ -219,32 +367,18 @@ def write_rate_csv(result, output_dir, base_name):
         "rate": rate,
         "error_lower": lower,
         "error_upper": upper,
+        "design_effect": result.counts.overall_design_effect(),
         **result.parameters,
         "method_name": method_name,
+        "population_scope": "all_stored_true"
+        if result.binned_by == "true"
+        else "all_nonempty_rec",
+        **result.counts.coverage(),
     }
     pd.DataFrame([overall]).to_csv(
         output_path / f"{result.metric}_overall_{result.binned_by}_binned_{slug}.csv",
         index=False,
     )
-
-
-def count_vertex_tracks(hdf5_path, bins):
-    """Raw true/rec populations by their own track count, without matching."""
-    bins = list(bins)
-    true_counts = dict.fromkeys(bins, 0)
-    reconstructed_counts = dict.fromkeys(bins, 0)
-    for event in iter_events(hdf5_path):
-        for vertices, counts in (
-            (event.true_tracks, true_counts),
-            (event.rec_tracks, reconstructed_counts),
-        ):
-            for tracks in vertices:
-                if not tracks:
-                    continue
-                bin_ = find_bin(bins, len(tracks))
-                if bin_ is not None:
-                    counts[bin_] += 1
-    return true_counts, reconstructed_counts
 
 
 def write_vertex_track_count_csv(
@@ -310,7 +444,6 @@ def plot_rate_lhcb2(result, output_dir, base_name, max_ntracks=150, ymax=None):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     stem = f"{result.stem}_{_slug(result.method_name(base_name))}_lhcb2"
-    plot_file = output_path / f"{stem}.pdf"
     is_efficiency = result.metric == "efficiency"
     spectrum = None
     if is_efficiency:
@@ -330,15 +463,99 @@ def plot_rate_lhcb2(result, output_dir, base_name, max_ntracks=150, ymax=None):
     elif result.binned_by == "true":
         spectrum = table.rename(columns={"denominator": "count"})
         spectrum_label = "True-vertex distribution (scaled)"
+    label = f"{base_name}: {result.label}"
+    if result.matching == "geo" and "m_r" in result.parameters:
+        label = rf"{base_name}: geometric matching ($m_r={result.parameters['m_r']:g}$)"
+
+    return _plot_rate_series_lhcb2(
+        [(table, label, "#2446b5", "o")],
+        output_path,
+        stem,
+        result.metric,
+        result.binned_by,
+        max_ntracks,
+        ymax,
+        spectrum,
+        spectrum_label if spectrum is not None else None,
+    )
+
+
+def plot_fake_rate_comparison_lhcb2(
+    track_result, reso_result, output_dir, base_name, max_ntracks=150, ymax=None
+):
+    """Overlay track-overlap and resolution-scaled fake rates for one sample.
+
+    Both results must count the same reconstructed vertices in the same bins.
+    Each result counts rec vertices with no qualifying truth candidate under
+    its own definition, without excluding track-based merges from geometric fake.
+    Each curve retains its own asymmetric
+    Clopper-Pearson bars; neither curve gets a population histogram. Display
+    limits leave the complete counts and the individual rate CSVs unchanged.
+    """
+    for result, matching in ((track_result, "track"), (reso_result, "reso")):
+        if (result.metric, result.binned_by, result.matching) != (
+            "fake_rate",
+            "rec",
+            matching,
+        ):
+            raise ValueError("Fake comparison requires track and reso rec fake rates")
+    if (
+        track_result.counts.bins != reso_result.counts.bins
+        or track_result.counts.denominator != reso_result.counts.denominator
+    ):
+        raise ValueError("Fake comparison requires identical rec populations and bins")
+
+    nsigma = reso_result.parameters["nsigma"]
+    series = []
+    for result, label, color, marker in (
+        (track_result, "Track overlap", "#c53c38", "s"),
+        (
+            reso_result,
+            rf"${nsigma:g}\sigma$ geometric (no truth in window)",
+            "#2446b5",
+            "o",
+        ),
+    ):
+        table = result.counts.table()
+        table = table[(table["denominator"] > 0) & (table["bin_end"] <= max_ntracks)]
+        if table.empty:
+            return None
+        series.append((table, label, color, marker))
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    return _plot_rate_series_lhcb2(
+        series,
+        output_path,
+        f"fake_rate_comparison_{_slug(base_name)}_lhcb2",
+        "fake_rate",
+        "rec",
+        max_ntracks,
+        ymax,
+    )
+
+
+def _plot_rate_series_lhcb2(
+    series,
+    output_path,
+    stem,
+    metric,
+    binned_by,
+    max_ntracks,
+    ymax,
+    spectrum=None,
+    spectrum_label=None,
+):
+    """Shared LHCb2 rendering for a single rate or a same-population overlay."""
+    is_efficiency = metric == "efficiency"
+    table = pd.concat([entry[0] for entry in series], ignore_index=True)
     if ymax is None:
         ymax = 1.10 if is_efficiency else _rate_display_ymax(table)
     if not np.isfinite(ymax) or ymax <= 0:
         raise ValueError("Rate plot ymax must be positive and finite")
     if ymax < table["rate"].max():
         raise ValueError("Rate plot ymax must include all displayed central values")
-    label = f"{base_name}: {result.label}"
-    if result.matching == "geo" and "m_r" in result.parameters:
-        label = rf"{base_name}: geometric matching ($m_r={result.parameters['m_r']:g}$)"
+    plot_file = output_path / f"{stem}.pdf"
 
     with plt.rc_context():
         hep.style.use(hep.style.LHCb2)
@@ -376,44 +593,47 @@ def plot_rate_lhcb2(result, output_dir, base_name, max_ntracks=150, ymax=None):
                 zorder=0,
                 label=spectrum_label,
             )
-        ax.errorbar(
-            table["bin_center"],
-            table["rate"],
-            yerr=table[["error_lower", "error_upper"]].to_numpy().T,
-            fmt="o",
-            color="#2446b5",
-            markersize=3.0,
-            markerfacecolor="none",
-            markeredgewidth=0.65,
-            elinewidth=0.8,
-            capsize=2.0,
-            capthick=0.8,
-            barsabove=True,
-            label=label,
-        )
-        above = table["rate"] + table["error_upper"] > ymax
-        if above.any():
-            ax.plot(
-                table.loc[above, "bin_center"],
-                np.full(above.sum(), 0.97 * ymax),
-                linestyle="none",
-                marker="^",
-                markersize=3,
-                color="#2446b5",
-                label="Interval extends above axis",
+        overflow_labeled = False
+        for table, label, color, marker in series:
+            ax.errorbar(
+                table["bin_center"],
+                table["rate"],
+                yerr=table[["error_lower", "error_upper"]].to_numpy().T,
+                fmt=marker,
+                color=color,
+                markersize=3.0,
+                markerfacecolor="none",
+                markeredgewidth=0.65,
+                elinewidth=0.8,
+                capsize=2.0,
+                capthick=0.8,
+                barsabove=True,
+                label=label,
             )
+            above = table["rate"] + table["error_upper"] > ymax
+            if above.any():
+                ax.plot(
+                    table.loc[above, "bin_center"],
+                    np.full(above.sum(), 0.97 * ymax),
+                    linestyle="none",
+                    marker="^",
+                    markersize=3,
+                    color=color,
+                    label="Interval extends above axis"
+                    if not overflow_labeled
+                    else "_nolegend_",
+                )
+                overflow_labeled = True
         ax.set_xlim(0, max_ntracks)
         ax.set_ylim(0, ymax)
         ax.set_xlabel(
             "Number of tracks per vertex"
             if is_efficiency
-            else f"Number of tracks per {_VERTEX_WORD[result.binned_by]} vertex",
+            else f"Number of tracks per {_VERTEX_WORD[binned_by]} vertex",
             fontsize=16,
             labelpad=3,
         )
-        ax.set_ylabel(
-            result.metric.replace("_", " ").capitalize(), fontsize=17, labelpad=4
-        )
+        ax.set_ylabel(metric.replace("_", " ").capitalize(), fontsize=17, labelpad=4)
         ax.xaxis.set_major_locator(MultipleLocator(25))
         ax.xaxis.set_minor_locator(AutoMinorLocator(5))
         ax.yaxis.set_major_locator(

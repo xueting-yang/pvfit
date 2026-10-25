@@ -1,4 +1,4 @@
-"""Associate selected track rows with truth vertices by event-local MC keys."""
+"""Associate input track rows with truth vertices by event-local MC keys."""
 
 import numpy as np
 import pandas as pd
@@ -9,20 +9,26 @@ def read_mcpv_dataframe(tree):
     return pd.DataFrame(tree.arrays(library="np"))
 
 
+# Rows a true vertex needs to enter the performance denominators; recorded in
+# the HDF5 output as truth_min_tracks by both pvfit fit and convert-allen.
+TRUTH_MIN_TRACKS = 4
+
+
 def select_tracks(tracks, params):
-    """Apply the reconstruction's z/t acceptance, preserving row order."""
+    """Select POCA centers in the seeding histogram window; retain row order."""
     return tracks[
-        tracks["beamPOCA_z"].between(params["zmin"], params["zmax"])
-        & tracks["beamPOCA_t"].between(params["tmin"], params["tmax"])
+        tracks["beamPOCA_z"].between(params["z_min"], params["z_max"])
+        & tracks["beamPOCA_t"].between(params["t_min"], params["t_max"])
     ]
 
 
-def build_true_vertex_info(tracks, vertices, min_tracks=4):
+def build_true_vertex_info(tracks, vertices, min_tracks=TRUTH_MIN_TRACKS):
     """Match mc_key membership in track_keys within a single event.
 
-    Return positional indices into selected tracks. Duplicate reconstructed
-    mc_keys remain distinct track rows. The minimum counts selected reconstructed
-    rows, not the dump's n_valid_tracks. Input coordinates do not decide membership.
+    Return positional indices into the supplied track table. The producer passes
+    the complete input table, before seeding z/t cuts. Duplicate mc_keys
+    remain distinct track rows. The minimum counts these rows, not the dump's
+    n_valid_tracks. Input coordinates do not decide membership.
     """
     if "mc_key" not in tracks:
         raise ValueError("Truth matching requires monitor_tree.mc_key")

@@ -171,7 +171,7 @@ class ToyTests(unittest.TestCase):
                 "merge_rate_true_binned_pvfit_geo_based.csv",
                 "resolution_z_overall_pvfit_track_based.csv",
                 "pull_analysis_input_track_summary.json",
-                "histogram_event_0.pdf",
+                "histogram_run_18_event_0.pdf",
             ):
                 self.assertIn(name, outputs)
 

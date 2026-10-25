@@ -36,7 +36,14 @@ def main():
     with zipfile.ZipFile(wheel) as archive:
         for source in (ROOT / "configs").glob("*.yaml"):
             assert archive.read(f"pvfit/_defaults/{source.name}") == source.read_bytes()
+        assert not any(
+            name.startswith(("dev/", "tests/")) for name in archive.namelist()
+        ), "Development validation and tests must not be installed in the wheel"
         assert "pvfit/toy/profile.json" in archive.namelist()
+        assert "pvfit/analysis/track_pull_config.py" in archive.namelist()
+        assert not any(
+            name.startswith("pvfit/analysis/analyze_") for name in archive.namelist()
+        ), "Retired serial analyzers must not be included in the wheel"
     with tarfile.open(sources[0]) as archive:
         members = {name.split("/", 1)[-1] for name in archive.getnames()}
         for name in (
@@ -48,6 +55,17 @@ def main():
             "tests/data/toy_regression_input.json",
         ):
             assert name in members, f"Missing sdist member: {name}"
+        assert not any(
+            name == "dev"
+            or name.startswith(("dev/", "tests/data/analysis_serial/"))
+            or name
+            in {
+                "tests/analysis_baseline.py",
+                "tests/analysis_comparison.py",
+                "tests/test_parallel_analysis.py",
+            }
+            for name in members
+        ), "Development analysis validation must not be included in the sdist"
     with tempfile.TemporaryDirectory(prefix="pvfit-installed-") as directory:
         work = Path(directory)
         env_dir = work / "venv"
@@ -101,7 +119,7 @@ def main():
             "-c",
             "from pathlib import Path; import pvfit; assert Path(pvfit.__file__).is_relative_to(Path.cwd() / 'venv'); print(pvfit.__file__)",
         )
-        invoke("-m", "pvfit", "toy", "--events", "1", "--seed", "18")
+        invoke("-m", "pvfit", "toy", "--events", "2", "--seed", "18")
         # No checkout configs or PYTHONPATH: these defaults must come from the wheel.
         invoke(
             "-m",
@@ -109,6 +127,10 @@ def main():
             "run",
             "--max-workers",
             "1",
+            "--analysis-workers",
+            "2",
+            "--analysis-batches",
+            "2",
             "--analyses",
             "efficiency_track",
             "efficiency_geo",

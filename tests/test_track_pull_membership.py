@@ -10,11 +10,14 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from pvfit.analysis.analyze_track_pull import _resolve_max_chi2, analyze_track_pull
+from pvfit.analysis.accumulators import TrackPull
+from pvfit.analysis.columns import ColumnReader
 from pvfit.analysis.run_analysis import run_analysis
+from pvfit.analysis.track_pull_config import resolve_track_pull_chi2
 from pvfit.config_loader import AnalysisConfig
 from pvfit.fit.save_results_to_hdf5 import save_all_events_to_hdf5
 from pvfit.fit.truth_matching import build_true_vertex_info
+from tests.reco_params import default_params
 
 
 class TrackPullMembershipTests(unittest.TestCase):
@@ -31,7 +34,7 @@ class TrackPullMembershipTests(unittest.TestCase):
         with h5py.File(self.path, "w") as f:
             f.attrs["n_events"] = 1
             if max_chi2 is not None:
-                f.attrs["reconstruction_max_chi2"] = max_chi2
+                f.attrs["reco_max_chi2_tukey"] = max_chi2
             event = f.create_group("0")
             true = event.create_group("true_vertices")
             for name in ("x", "y", "z", "t"):
@@ -47,10 +50,17 @@ class TrackPullMembershipTests(unittest.TestCase):
                 tracks[name] = values
 
     def analyze(self, max_chi2=None):
-        with patch("pvfit.analysis.analyze_track_pull._plot_track_pulls") as plot:
-            summary = analyze_track_pull(self.path, self.directory.name, max_chi2)
+        settings = AnalysisConfig(
+            analyses=("track_pull",), track_pull_chi2=max_chi2, keep_columns=True
+        )
+        with patch("pvfit.analysis.residual_accumulators._plot_track_pulls") as plot:
+            execution = run_analysis(str(self.path), self.directory.name, settings)
         plot.assert_called_once()
-        return summary, plot.call_args.args[0]
+        reader = ColumnReader(
+            sorted(Path(execution["work_dir"]).glob("batch_*/columns.json"))
+        )
+        data = {name: reader.array(f"track/{name}") for name in TrackPull.FIELDS}
+        return plot.call_args.args[0]["summary"], data
 
     def test_uses_track_indices_without_origin_coordinate_fields(self):
         self.write_tracks(indices=[1], states={"x": [100.0, 0.1]})
@@ -123,13 +133,16 @@ class TrackPullMembershipTests(unittest.TestCase):
 
     def test_default_analysis_follows_stored_reconstruction_threshold(self):
         self.write_tracks(states={"x": [2.0, 3.0]}, max_chi2=4.0)
-        with patch("pvfit.analysis.analyze_track_pull._plot_track_pulls") as plot:
+        with patch("pvfit.analysis.residual_accumulators._plot_track_pulls") as plot:
             run_analysis(
                 str(self.path),
                 self.directory.name,
                 AnalysisConfig(analyses=("track_pull",)),
             )
-        np.testing.assert_array_equal(plot.call_args.args[0]["pull_x"], [2.0])
+        plot.assert_called_once()
+        selected = plot.call_args.args[0]["summary"]["statistics"]["pull_x"]
+        self.assertEqual(selected["n"], 1)
+        self.assertEqual(selected["mean"], 2.0)
         summary = json.loads(
             (
                 Path(self.directory.name) / "pull_analysis_input_track_summary.json"
@@ -141,7 +154,7 @@ class TrackPullMembershipTests(unittest.TestCase):
     def test_legacy_file_uses_adjacent_reconstruction_snapshot(self):
         self.write_tracks(states={"x": [0.5, 2.0]}, max_chi2=None)
         self.path.with_name("reconstruction.yaml").write_text(
-            "algorithm:\n  max_chi2: 1.0\n"
+            "algorithm:\n  max_chi2_tukey: 1.0\n"
         )
         summary, data = self.analyze()
         np.testing.assert_array_equal(data["pull_x"], [0.5])
@@ -151,9 +164,9 @@ class TrackPullMembershipTests(unittest.TestCase):
     def test_stored_value_takes_precedence_over_a_different_snapshot(self):
         self.write_tracks(max_chi2=4.0)
         self.path.with_name("reconstruction.yaml").write_text(
-            "algorithm:\n  max_chi2: 9\n"
+            "algorithm:\n  max_chi2_tukey: 9\n"
         )
-        value, source = _resolve_max_chi2(self.path)
+        value, source = resolve_track_pull_chi2(self.path)
         self.assertEqual(value, 4.0)
         self.assertIn("HDF5 attribute", source)
 
@@ -259,20 +272,15 @@ class TrackPullMembershipTests(unittest.TestCase):
             "histogram": np.zeros((2, 2)),
             "n_seedings": 0,
             "seeds": [],
-            "event_data_selected": tracks,
+            "event_data": tracks,
+            "selected_for_seeding": np.ones(len(tracks), dtype=bool),
         }
-        params = {
-            "zmin": -200,
-            "zmax": 200,
-            "tmin": -0.6,
-            "tmax": 0.8,
-            "Nbins_z": 2,
-            "Nbins_t": 2,
-            "max_chi2": 6.5,
-        }
+        params = default_params(
+            t_min=-0.6, t_max=0.8, n_bins_z=2, n_bins_t=2, max_chi2_tukey=6.5
+        )
         save_all_events_to_hdf5([result], self.path, params)
         with h5py.File(self.path, "r") as f:
-            self.assertEqual(f.attrs["reconstruction_max_chi2"], 6.5)
+            self.assertEqual(f.attrs["reco_max_chi2_tukey"], 6.5)
             saved = f["0/tracks"]
             for name in ("tx", "ty"):
                 np.testing.assert_array_equal(

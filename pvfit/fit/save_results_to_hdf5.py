@@ -5,7 +5,6 @@ rec_vertices/ and tracks/) is documented in docs/data-format.md under "HDF5 layo
 the tables below are its definition. Every dataset is gzip-compressed.
 """
 
-import json
 from pathlib import Path
 
 import h5py
@@ -13,8 +12,10 @@ import numpy as np
 from tqdm import tqdm
 
 from ..provenance import HDF5_SCHEMA_VERSION, implementation_fingerprint
+from ..reconstruction_parameters import write_parameters
+from .truth_matching import TRUTH_MIN_TRACKS
 
-# tracks/<name>: (column of the selected-track DataFrame, dtype)
+# tracks/<name>: (column of the full input-track DataFrame, dtype)
 TRACK_COLUMNS = {
     "track_id": (None, np.int32),  # row number; set separately
     "mc_key": ("mc_key", np.int64),
@@ -83,18 +84,21 @@ def _write_vlen_int32(group, name, rows):
     )
 
 
-def save_event_to_hdf5(event_result, event_data_selected, output_file, params):
+def save_event_to_hdf5(event_result, event_data, output_file, params):
     """Append one event's results to the HDF5 file.
 
     Args:
         event_result: Event processing results from process_event()
-        event_data_selected: Selected track data for the event (pandas DataFrame)
+        event_data: Full input track data for the event (pandas DataFrame)
         output_file: Path to output HDF5 file
         params: Algorithm parameters (for histogram metadata)
     """
     true_info = event_result["vertex_true_info"]
     rec_info = event_result["vertex_rec_info"]
-    n_tracks = len(event_data_selected)
+    n_tracks = len(event_data)
+    selected = np.asarray(event_result["selected_for_seeding"], dtype=bool)
+    if selected.shape != (n_tracks,):
+        raise ValueError("Seeding selection must have one flag per input track")
 
     with h5py.File(output_file, "a") as f:
         name = str(event_result["event_number"])
@@ -102,6 +106,9 @@ def save_event_to_hdf5(event_result, event_data_selected, output_file, params):
             del f[name]
         event = f.create_group(name)
         event.attrs["n_tracks"] = n_tracks
+        event.attrs["n_seeding_tracks"] = int(selected.sum())
+        event.attrs["truth_track_selection"] = "all_input"
+        event.attrs["assignment_track_selection"] = "all_input"
         event.attrs["n_true_vertices"] = len(true_info)
         event.attrs["n_rec_vertices"] = len(rec_info)
         event.attrs["n_seedings"] = event_result["n_seedings"]
@@ -115,15 +122,8 @@ def save_event_to_hdf5(event_result, event_data_selected, output_file, params):
         histogram = _write_dataset_returning(
             event, "histogram", event_result["histogram"]
         )
-        for attr, key in (
-            ("z_min", "zmin"),
-            ("z_max", "zmax"),
-            ("t_min", "tmin"),
-            ("t_max", "tmax"),
-            ("n_bins_z", "Nbins_z"),
-            ("n_bins_t", "Nbins_t"),
-        ):
-            histogram.attrs[attr] = params[key]
+        for attr in ("z_min", "z_max", "t_min", "t_max", "n_bins_z", "n_bins_t"):
+            histogram.attrs[attr] = params[attr]
 
         # Every seed, including those later dropped or merged
         seeds = np.asarray(event_result["seeds"], dtype=np.float32).reshape(-1, 2)
@@ -147,24 +147,37 @@ def save_event_to_hdf5(event_result, event_data_selected, output_file, params):
         _write_vlen_int32(rec, "track_indices", [v["track_index"] for v in rec_info])
 
         tracks = event.create_group("tracks")
+        _write(tracks, "selected_for_seeding", selected, np.bool_)
         for name, (column, dtype) in TRACK_COLUMNS.items():
             if column is None:
                 _write(tracks, name, np.arange(n_tracks), dtype)
             else:
-                _write(tracks, name, event_data_selected[column].to_numpy(), dtype)
+                _write(tracks, name, event_data[column].to_numpy(), dtype)
 
 
 def _write_dataset_returning(group, name, data):
     return group.create_dataset(name, data=data, compression="gzip", compression_opts=4)
 
 
-def save_all_events_to_hdf5(fit_results, output_file, params, *, provenance_path=None):
+def save_all_events_to_hdf5(
+    fit_results,
+    output_file,
+    params,
+    *,
+    provenance_path=None,
+    track_input_attributes=None,
+):
     """Save all events' results to HDF5 file with dynamic sizes per event.
 
     Args:
         fit_results: List of event processing results from process_event()
         output_file: Path to output HDF5 file
-        params: Algorithm parameters (for histogram metadata)
+        params: the reconstruction parameters (ReconstructionConfig.as_params());
+            every one named in pvfit.reconstruction_parameters is recorded as a
+            root attribute reco_<name>, track-input parameters as input_<name>
+        provenance_path: CLI stage record, when run from the CLI
+        track_input_attributes: attributes naming the configuration file the
+            track-input parameters were read from, when there is one
     """
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -175,20 +188,21 @@ def save_all_events_to_hdf5(fit_results, output_file, params, *, provenance_path
     with h5py.File(output_file, "w") as f:
         f.attrs["n_events"] = len(fit_results)
         f.attrs["source"] = "PVFit"
+        f.attrs["truth_track_selection"] = "all_input"
+        f.attrs["assignment_track_selection"] = "all_input"
         f.attrs["schema_version"] = HDF5_SCHEMA_VERSION
         for key, value in implementation_fingerprint().items():
             f.attrs[key] = value
-        f.attrs["reconstruction_parameters"] = json.dumps(
-            params, sort_keys=True, allow_nan=False
-        )
+        f.attrs["truth_min_tracks"] = TRUTH_MIN_TRACKS
+        write_parameters(f.attrs, params)
+        for key, value in (track_input_attributes or {}).items():
+            f.attrs[key] = value
         if provenance_path is not None:
             f.attrs["provenance_manifest"] = str(Path(provenance_path).resolve())
-        if "max_chi2" in params:
-            f.attrs["reconstruction_max_chi2"] = params["max_chi2"]
 
     for event_result in tqdm(fit_results, desc="Saving events to HDF5"):
         save_event_to_hdf5(
-            event_result, event_result["event_data_selected"], output_file, params
+            event_result, event_result["event_data"], output_file, params
         )
 
     print(f"Successfully saved {len(fit_results)} events to {output_file}")

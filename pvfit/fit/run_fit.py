@@ -21,6 +21,7 @@ def run_fit(
     hdf5_file: str,
     *,
     provenance_path: str | None = None,
+    track_input=None,
 ):
     """
     Run the full PVfit reconstruction pipeline and save results to HDF5.
@@ -40,6 +41,10 @@ def run_fit(
         max_workers (int): number of workers
         output_dir (str): output directory
         hdf5_file (str): HDF5 file name
+        provenance_path (str): CLI stage record, when run from the CLI
+        track_input: ``(parameters, attributes)`` of the track input, as
+            :func:`pvfit.allen.load_track_input` returns them for
+            ``paths.track_input_configuration``; recorded with the result
     Returns:
         str: path to produced HDF5 file
     """
@@ -156,6 +161,12 @@ def run_fit(
         result["source_event_number"] = int(origin["source_event_number"])
         result["source_file"] = str(origin["source_file"])
 
+    # Parameters of the track input are recorded, not set, by this fit
+    track_input_attributes = None
+    if track_input is not None:
+        input_parameters, track_input_attributes = track_input
+        params = {**params, **input_parameters}
+
     # ------------------------------------------------------------
     # Save to HDF5
     # ------------------------------------------------------------
@@ -167,6 +178,7 @@ def run_fit(
         hdf5_path,
         params,
         provenance_path=provenance_path,
+        track_input_attributes=track_input_attributes,
     )
 
     return hdf5_path

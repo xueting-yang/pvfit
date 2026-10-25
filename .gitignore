@@ -32,3 +32,6 @@ temp/
 
 # Logs
 *.log
+
+# Local analysis migration checks and frozen references
+/dev/analysis_validation/

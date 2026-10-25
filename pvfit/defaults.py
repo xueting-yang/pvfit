@@ -2,7 +2,13 @@
 
 from pathlib import Path
 
-CONFIG_NAMES = ("reconstruction.yaml", "analysis.yaml", "optimization.yaml")
+CONFIG_NAMES = (
+    "reconstruction.yaml",
+    "analysis.yaml",
+    "optimization.yaml",
+    "allen.yaml",
+    "optimization_allen.yaml",
+)
 
 
 def bundled_config_dir():

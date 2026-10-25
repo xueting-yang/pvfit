@@ -16,6 +16,8 @@ from pvfit.cli import main
 from pvfit.defaults import bundled_config_dir, default_config_path, export_configs
 from pvfit.fit.save_results_to_hdf5 import save_all_events_to_hdf5
 from pvfit.provenance import HDF5_SCHEMA_VERSION, StageRecord
+from pvfit.reconstruction_parameters import read_parameters
+from tests.reco_params import default_params
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -82,16 +84,38 @@ class ProvenanceTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()),
         ):
             output = Path(directory) / "results.h5"
+            params = default_params(max_chi2_tukey=8.0)
             save_all_events_to_hdf5(
-                [], output, {"max_chi2": 8}, provenance_path="manifest.json"
+                [],
+                output,
+                {**params, "hit_time_resolution_ns": 0.05},
+                provenance_path="manifest.json",
+                track_input_attributes={"track_input_configuration_sha256": "0" * 64},
             )
             with h5py.File(output) as source:
                 self.assertEqual(source.attrs["schema_version"], HDF5_SCHEMA_VERSION)
+                # Every reconstruction parameter is an explicit reco_* attribute
+                recorded = read_parameters(source.attrs)
+                self.assertEqual(recorded["max_chi2_tukey"], 8.0)
+                self.assertEqual(recorded["max_track_seed_chi2"], 10.0)
+                self.assertEqual(recorded["hit_time_resolution_ns"], 0.05)
                 self.assertEqual(
-                    json.loads(source.attrs["reconstruction_parameters"]),
-                    {"max_chi2": 8},
+                    set(recorded),
+                    {name for name in params if name not in (
+                        "bin_size_z", "bin_size_t", "scaled_min_tracks_in_seed",
+                        "is_adaptive_tukey",
+                    )} | {"hit_time_resolution_ns"},
+                )  # fmt: skip
+                self.assertEqual(
+                    source.attrs["track_input_configuration_sha256"], "0" * 64
                 )
-                self.assertEqual(source.attrs["reconstruction_max_chi2"], 8)
+                self.assertEqual(source.attrs["input_hit_time_resolution_ns"], 0.05)
+                self.assertEqual(source.attrs["truth_min_tracks"], 4)
+                self.assertNotIn("reconstruction_parameters", source.attrs)
+            # Incomplete parameters are refused rather than silently omitted
+            with self.assertRaisesRegex(KeyError, "max_vertex_rho2"):
+                incomplete = {k: v for k, v in params.items() if k != "max_vertex_rho2"}
+                save_all_events_to_hdf5([], output, incomplete)
                 self.assertEqual(len(source.attrs["source_sha256"]), 64)
                 self.assertTrue(
                     source.attrs["provenance_manifest"].endswith("manifest.json")
