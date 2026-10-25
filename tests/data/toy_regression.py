@@ -97,6 +97,9 @@ def summarize(output, settings, directory):
         run_analysis(output, str(directory), settings)
     rates = {}
     for path in sorted(directory.glob("*.csv")):
+        # Pair-level diagnostics are tested separately, not frozen rate tables.
+        if path.name.startswith("merge_distance_"):
+            continue
         with path.open() as stream:
             rates[path.name] = list(csv.DictReader(stream))
     return {"events": events, "rates": rates}

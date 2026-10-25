@@ -21,6 +21,7 @@ from .analyze_fake_rate_geo import (
 from .analyze_fake_rate_track import (
     analyze_vertex_fake_rate as analyze_vertex_fake_rate_track,
 )
+from .analyze_merge_distance import analyze_merge_distance
 from .analyze_merge_rate_track import (
     analyze_vertex_merge_rate as analyze_vertex_merge_rate_track,
 )
@@ -152,6 +153,11 @@ def run_analysis(hdf5_file: str, output_dir: str, settings: AnalysisConfig):
     # ------------------------------------------------------------
     # Residual analyses and the event display
     # ------------------------------------------------------------
+    if "merge_rate" in analyses:
+        analyze_merge_distance(
+            hdf5_file, output_dir, settings.recall_threshold, settings.method_name
+        )
+
     if "resolution" in analyses:
         analyze_vertex_resolution(
             hdf5_path=hdf5_file,

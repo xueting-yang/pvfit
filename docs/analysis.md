@@ -79,6 +79,27 @@ Clopper-Pearson errors and CSV values stay unchanged. An optional
 `<fake_rate|merge_rate|split_rate>_<track|geo|reso>_<true|rec>`
 (fake rate only has `rec`). An override must still include all central values.
 
+### Merge-distance distributions
+
+Selecting `merge_rate` also writes `merge_distance_<method>_track_based.pdf`
+and `.png`: the signed true-pair Δz projection (mm), joint Δz–Δt counts, and
+horizontal Δt projection (ns). It reuses the track-based merge definition and
+`recall_threshold`; it does not change the rate or matching definitions. These
+are separations **between true vertices sharing a reconstructed merge**, not
+reconstructed-minus-true residuals or distances between arbitrary neighbours.
+
+Each unordered true pair counts once per event, including all k(k−1)/2 pairs
+in a merge of k true vertices; repeated merges of the same pair are deduplicated.
+The sign is higher true-row index minus lower index, without sorting by z or
+mirroring pairs. This diagnostic has no track-multiplicity bin cut. The `.csv`
+keeps all pairs and their file-local HDF5 event groups/true indices. The `.json`
+records input path, counting/sign convention, thresholds, nonfinite exclusions,
+bin edges and visible counts. Figure windows are ±3 mm and ±0.1 ns; projection
+counts include finite pairs outside the *other* coordinate's window, while the
+joint panel includes only pairs inside both. Tails remain in the CSV. Empty
+samples produce labelled empty plots. This plot uses track matching only;
+`merge_rate_geo` retains its existing geometric/resolution-based rate outputs.
+
 ### CSV files
 
 Whenever any rate analysis runs, it also writes one
@@ -152,6 +173,7 @@ output/<experiment>/
     ├── <metric>_<true|rec>_binned_<method>_lhcb2.pdf / .png   # one per rate result
     ├── <metric>_<true|rec>_binned_<method>.csv
     ├── <metric>_overall_<true|rec>_binned_<method>.csv
+    ├── merge_distance_<base_method>_track_based.pdf / .png / .csv / .json
     ├── resolution_*.pdf
     ├── pull_analysis_input_track.pdf / .png
     ├── pull_analysis_input_track_summary.json
